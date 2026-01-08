@@ -426,7 +426,7 @@ class Brain:
                 return ""
             return m.group(0)
 
-        out = re.sub(r"^\s*\*\s*([^\n]{1,60}?)(?:\s*[.!?]+\s+)", _strip_leading_star_action, out)
+        out = re.sub(r"^\s*\*\s*([^\n]{1,80}?)(?:\s*[,.;:!?]+(?:\s+|$))", _strip_leading_star_action, out)
 
         def _strip_action(m: re.Match) -> str:
             inner = (m.group(1) or "").strip().lower()

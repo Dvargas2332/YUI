@@ -31,7 +31,7 @@ class PendingAction:
     code: str
     description: str
     created_at: float
-    run: Callable[[], None]
+    run: Callable[[], Optional[str]]
 
 
 class ConfirmGate:
@@ -49,7 +49,7 @@ class ConfirmGate:
         self._on_request = on_request
         self._on_clear = on_clear
 
-    def request(self, description: str, run: Callable[[], None]) -> PendingAction:
+    def request(self, description: str, run: Callable[[], Optional[str]]) -> PendingAction:
         nonce = secrets.token_hex(2)  # internal id like "a3f2"
         digits = _env_int("YUI_CONFIRM_CODE_DIGITS", 6)
         digits = max(4, min(10, int(digits)))
@@ -162,7 +162,13 @@ class ConfirmGate:
 
         run = self.pending.run
         self.clear()
-        run()
+        try:
+            msg = run()
+        except Exception as e:
+            print(f"[YUI] Confirm action failed: {type(e).__name__}: {e}")
+            return "Tuve un error ejecutando esa acciИn. Revisa la consola."
+        if isinstance(msg, str) and msg.strip():
+            return msg.strip()
         return "Listo."
 
 

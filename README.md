@@ -15,7 +15,7 @@ Copyright (c) 2026 Diego Alonso Vargas Almengor
 1) Instala dependencias:
 `pip install -r requirements.txt`
 
-2) Crea tu `.env` (puedes copiar `.env.example`) y configura el LLM:
+2) Crea tu `.env` y configura el LLM:
 - `YUI_LLM_API_KEY=...`
 - `YUI_LLM_BASE_URL=https://api.deepseek.com`
 - `YUI_LLM_MODEL=deepseek-chat` (rápido)
@@ -33,10 +33,13 @@ Copyright (c) 2026 Diego Alonso Vargas Almengor
 - `YUI_PREVIEW=1` (0 desactiva la ventana de cámara)
 - `YUI_VISION_EVERY_N_FRAMES=2` (más alto = menos CPU)
 - `YUI_STT_BACKEND=auto` (auto/speech_recognition/sounddevice/text)
-- `YUI_TTS_ENGINE=edge` y `YUI_TTS_VOICE=es-MX-DaliaNeural`
+- `YUI_STT_LANGUAGE=es-CR` (ajústalo a tu región si quieres)
+- `YUI_TTS_ENGINE=edge` y `YUI_TTS_VOICE=es-CR-MariaNeural`
 - `YUI_DESKTOP_ENABLED=1` (comandos de escritorio; borrar/modificar requiere confirmación)
 - Seguridad: `YUI_SECURITY_GUARD=1` (URLs sospechosas y ejecutables requieren confirmación)
 - Entrada siempre activa: voz + texto. Di `no escuches` para apagar micrófono y `escucha` para reactivarlo.
+- Gestos: `YUI_GESTURE_RECOGNIZER=1` (opcional; por defecto está desactivado por falsos positivos)
+- Gestos: `YUI_GESTURES_ALLOWED=open_palm,wave,peace,fist,thumbs_up` (si quieres permitir `thumbs_up`)
 
 ## Comandos de seguridad (rápidos)
 - `auditoria seguridad` (Defender + firewall)

@@ -78,7 +78,9 @@ class VisionEngine:
         try:
             self._ensure_model(hand_path, HAND_MODEL_URL)
             self._ensure_model(face_path, FACE_MODEL_URL)
-            if os.getenv("YUI_GESTURE_RECOGNIZER", "1") not in {"0", "false", "False"}:
+            # GestureRecognizer tends to be noisy on webcams (false positives like "thumbs_up").
+            # Keep it opt-in via env.
+            if os.getenv("YUI_GESTURE_RECOGNIZER", "0") not in {"0", "false", "False"}:
                 self._ensure_model(gesture_path, GESTURE_MODEL_URL)
         except Exception as e:
             print(f"[YUI] MediaPipe model download failed: {type(e).__name__}: {e}")
@@ -91,7 +93,7 @@ class VisionEngine:
             track = float(os.getenv("YUI_HAND_TRACK_CONF", "0.5"))
 
             self._gesture = None
-            if os.getenv("YUI_GESTURE_RECOGNIZER", "1") not in {"0", "false", "False"}:
+            if os.getenv("YUI_GESTURE_RECOGNIZER", "0") not in {"0", "false", "False"}:
                 try:
                     gesture_options = self._vision.GestureRecognizerOptions(
                         base_options=mp.tasks.BaseOptions(model_asset_path=str(gesture_path)),
@@ -337,12 +339,15 @@ class VisionEngine:
                         continue
                     gesture_hits.append(g)
 
+        gesture_hits = [g for g in gesture_hits if self._gesture_allowed(g)]
+
         # Temporal smoothing (reduces flicker): keep gestures that persist across frames.
         wave_now = "wave" in gesture_hits
         stable = self._smooth_gestures([g for g in gesture_hits if g != "wave"])
         if wave_now:
             stable.append("wave")
 
+        stable = [g for g in stable if self._gesture_allowed(g)]
         return stable, True, hand_vec
 
     def _hand_quality_ok(self, lm) -> bool:
@@ -410,7 +415,23 @@ class VisionEngine:
             "iloveyou": "iloveyou",
         }
         n2 = n.replace(" ", "_")
-        return mapping.get(n2)
+        mapped = mapping.get(n2)
+        if not mapped:
+            return None
+        return mapped if self._gesture_allowed(mapped) else None
+
+    def _gesture_allowed(self, gesture: str) -> bool:
+        g = (gesture or "").strip().lower()
+        if not g:
+            return False
+        allow = (os.getenv("YUI_GESTURES_ALLOWED") or "").strip().lower()
+        if allow:
+            allow = allow.replace("|", ",").replace(";", ",")
+            parts = [p.strip() for p in allow.split(",") if p.strip()]
+            return g in set(parts)
+
+        # Default allowlist (conservative to reduce false positives).
+        return g in {"open_palm", "wave", "peace", "fist"}
 
     def _handedness(self, handedness, idx: int) -> Optional[str]:
         try:
@@ -537,7 +558,14 @@ class VisionEngine:
                 gestures.append("wave")
         elif fingers_up == 0:
             gestures.append("fist")
-        elif state["thumb"] and not state["index"] and not state["middle"] and not state["ring"] and not state["pinky"]:
+        elif (
+            self._gesture_allowed("thumbs_up")
+            and state["thumb"]
+            and not state["index"]
+            and not state["middle"]
+            and not state["ring"]
+            and not state["pinky"]
+        ):
             gestures.append("thumbs_up")
         elif state["index"] and state["middle"] and not state["ring"] and not state["pinky"]:
             gestures.append("peace")

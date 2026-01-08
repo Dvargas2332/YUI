@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Optional
 
+
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 _PYGAME_READY = False
 
@@ -76,6 +79,25 @@ async def _edge_tts_to_file(*, text: str, voice: str, rate: str, volume: str, pi
     communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate, volume=volume, pitch=pitch)
     await communicate.save(str(out_path))
 
+
+def _strip_ssml(text: str) -> str:
+    """
+    Some fallback engines (pyttsx3) will literally read SSML/XML tags.
+    Strip them defensively so spoken output stays natural.
+    """
+    t = (text or "").strip()
+    if not t:
+        return ""
+    if "<" not in t and ">" not in t:
+        return t
+    t = re.sub(r"</?speak\b[^>]*>", " ", t, flags=re.IGNORECASE)
+    t = re.sub(r"</?voice\b[^>]*>", " ", t, flags=re.IGNORECASE)
+    t = re.sub(r"</?prosody\b[^>]*>", " ", t, flags=re.IGNORECASE)
+    t = re.sub(r"<break\b[^>]*>", " ", t, flags=re.IGNORECASE)
+    t = re.sub(r"\s{2,}", " ", t).strip()
+    return t
+
+
 def hablar(
     texto: str,
     *,
@@ -84,7 +106,7 @@ def hablar(
     edge_rate: str = "+0%",
     edge_volume: str = "+0%",
     edge_pitch: str = "+0Hz",
-    use_ssml: bool = True,
+    use_ssml: bool = False,
     rate: int = 165,
     volume: float = 1.0,
 ) -> Optional[Path]:
@@ -102,19 +124,22 @@ def hablar(
                 print(f"[YUI] TTS audio generado pero no se pudo reproducir: {path}")
             return path
 
-    if engine_norm in {"pyttsx3", "auto"}:
-        if _speak_pyttsx3(texto, rate=rate, volume=volume):
+    # Fallback engines (also used when edge fails but engine was set to "edge").
+    texto_plain = _strip_ssml(texto) if use_ssml else texto
+
+    if engine_norm in {"pyttsx3", "auto", "edge"}:
+        if _speak_pyttsx3(texto_plain, rate=rate, volume=volume):
             return None
 
-    if engine_norm in {"gtts", "auto"}:
-        path = _speak_gtts_to_path(texto)
+    if engine_norm in {"gtts", "auto", "edge"}:
+        path = _speak_gtts_to_path(texto_plain)
         if path is not None:
             ok = _play_mp3(path)
             if not ok and _debug_tts():
                 print(f"[YUI] TTS gTTS generado pero no se pudo reproducir: {path}")
             return path
 
-    print(f"YUI: {texto}")
+    print(f"YUI: {texto_plain}")
     return None
 
 
@@ -150,7 +175,7 @@ def _speak_edge_to_path(text: str, *, voice: str, rate: str, volume: str, pitch:
             loop.close()
     except Exception as e:
         # Retry with a known-good Spanish female voice.
-        fallback_voice = os.getenv("YUI_TTS_VOICE_FALLBACK", "es-MX-DaliaNeural").strip() or "es-MX-DaliaNeural"
+        fallback_voice = os.getenv("YUI_TTS_VOICE_FALLBACK", "es-CR-MariaNeural").strip() or "es-CR-MariaNeural"
         if fallback_voice != voice:
             try:
                 asyncio.run(_edge_tts_to_file(text=text, voice=fallback_voice, rate=rate, volume=volume, pitch=pitch, out_path=mp3_path))

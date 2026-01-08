@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -44,6 +45,75 @@ def _run_powershell_json(script: str, *, timeout_s: float = 12.0) -> Optional[An
         return json.loads(out)
     except Exception:
         return None
+
+
+def _ps_single_quote(value: str) -> str:
+    # PowerShell single-quoted strings escape with doubled single quotes.
+    return str(value).replace("'", "''")
+
+
+def _run_powershell_json_elevated(script: str, *, timeout_s: float = 30.0) -> Optional[Any]:
+    """
+    Runs a PowerShell script elevated (UAC prompt) and returns JSON output.
+    Uses a temporary .ps1 to avoid quoting issues.
+    """
+    if not _is_windows():
+        return None
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="yui_admin_"))
+    out_path = tmp_dir / "out.json"
+    ps1_path = tmp_dir / "run.ps1"
+
+    out_q = _ps_single_quote(str(out_path))
+
+    ps1_body = f"""$ErrorActionPreference = 'Stop'
+$payload = $null
+try {{
+  $result = & {{ {script} }}
+  $payload = @{{ ok = $true; result = $result }}
+}} catch {{
+  $payload = @{{ ok = $false; error = $_.Exception.Message; detail = ($_ | Out-String) }}
+}}
+$payload | ConvertTo-Json -Compress | Out-File -FilePath '{out_q}' -Encoding utf8
+"""
+    try:
+        ps1_path.write_text(ps1_body, encoding="utf-8")
+    except Exception:
+        return None
+
+    ps1_q = _ps_single_quote(str(ps1_path))
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        (
+            "Start-Process PowerShell -Verb RunAs -WindowStyle Hidden -Wait "
+            f"-ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{ps1_q}')"
+        ),
+    ]
+
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=float(timeout_s), check=False)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "timeout", "detail": "Timeout waiting for elevated PowerShell."}
+    except Exception as e:
+        return {"ok": False, "error": type(e).__name__, "detail": str(e)}
+
+    if not out_path.exists():
+        detail = ((res.stdout or "") + "\n" + (res.stderr or "")).strip()
+        if not detail:
+            detail = "No output (maybe UAC was canceled)."
+        return {"ok": False, "error": "elevation_failed", "detail": detail}
+
+    try:
+        raw = out_path.read_text(encoding="utf-8", errors="replace").strip()
+        if not raw:
+            return {"ok": False, "error": "empty", "detail": "Empty elevated output."}
+        return json.loads(raw)
+    except Exception as e:
+        return {"ok": False, "error": "parse_error", "detail": f"{type(e).__name__}: {e}"}
 
 
 def quick_audit() -> SecurityAudit:
@@ -227,6 +297,145 @@ def system_audit() -> SecurityAudit:
 
     voice = "Listo. Hice un autodiagnostico del sistema y te deje el detalle en consola."
     return SecurityAudit(voice=voice, detail="\n".join(lines).strip())
+
+
+def firewall_set_enabled(enabled: bool) -> SecurityAudit:
+    """
+    Enables/disables Windows Firewall profiles (requires admin via UAC).
+    """
+    if not _is_windows():
+        return SecurityAudit(voice="Solo puedo controlar el firewall en Windows.")
+
+    flag = "$true" if bool(enabled) else "$false"
+    script = (
+        f"$before = Get-NetFirewallProfile | Select-Object Name,Enabled; "
+        f"Set-NetFirewallProfile -Profile Domain,Private,Public -Enabled {flag}; "
+        "$after = Get-NetFirewallProfile | Select-Object Name,Enabled; "
+        "@{before=$before; after=$after}"
+    )
+    data = _run_powershell_json_elevated(script, timeout_s=45.0)
+    if not isinstance(data, dict) or not data.get("ok"):
+        detail = ""
+        if isinstance(data, dict):
+            detail = str(data.get("detail") or data.get("error") or "")
+        return SecurityAudit(voice="No pude cambiar el firewall (posible cancelacion de UAC).", detail=detail)
+
+    detail = ""
+    try:
+        detail = json.dumps(data.get("result"), ensure_ascii=False, indent=2)
+    except Exception:
+        detail = ""
+
+    voice = "Listo. Firewall activado." if enabled else "Listo. Firewall desactivado."
+    return SecurityAudit(voice=voice, detail=detail)
+
+
+def firewall_block_ip(ip: str) -> SecurityAudit:
+    """
+    Adds outbound+inbound firewall block rules for a remote IP (requires admin via UAC).
+    """
+    if not _is_windows():
+        return SecurityAudit(voice="Solo puedo controlar el firewall en Windows.")
+    ip = (ip or "").strip()
+    if not ip:
+        return SecurityAudit(voice="Dime la IP a bloquear.")
+
+    ip_q = _ps_single_quote(ip)
+    script = (
+        f"$ip='{ip_q}'; "
+        "$outName = \"YUI Block IP $ip OUT\"; "
+        "$inName = \"YUI Block IP $ip IN\"; "
+        "Get-NetFirewallRule -DisplayName $outName -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue; "
+        "Get-NetFirewallRule -DisplayName $inName -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction SilentlyContinue; "
+        "New-NetFirewallRule -DisplayName $outName -Direction Outbound -Action Block -RemoteAddress $ip -Profile Any -Enabled True | Out-Null; "
+        "New-NetFirewallRule -DisplayName $inName -Direction Inbound -Action Block -RemoteAddress $ip -Profile Any -Enabled True | Out-Null; "
+        "@{ip=$ip; rules=@($outName,$inName)}"
+    )
+    data = _run_powershell_json_elevated(script, timeout_s=45.0)
+    if not isinstance(data, dict) or not data.get("ok"):
+        detail = ""
+        if isinstance(data, dict):
+            detail = str(data.get("detail") or data.get("error") or "")
+        return SecurityAudit(voice="No pude bloquear esa IP (posible cancelacion de UAC).", detail=detail)
+
+    return SecurityAudit(voice=f"Listo. Bloquee la IP {ip}.", detail=json.dumps(data.get("result"), ensure_ascii=False, indent=2))
+
+
+def firewall_unblock_ip(ip: str) -> SecurityAudit:
+    """
+    Removes YUI block rules for an IP (requires admin via UAC).
+    """
+    if not _is_windows():
+        return SecurityAudit(voice="Solo puedo controlar el firewall en Windows.")
+    ip = (ip or "").strip()
+    if not ip:
+        return SecurityAudit(voice="Dime la IP a desbloquear.")
+
+    ip_q = _ps_single_quote(ip)
+    script = (
+        f"$ip='{ip_q}'; "
+        "$rules = @(\"YUI Block IP $ip OUT\",\"YUI Block IP $ip IN\"); "
+        "$removed = @(); "
+        "foreach ($r in $rules) { "
+        "  $existing = Get-NetFirewallRule -DisplayName $r -ErrorAction SilentlyContinue; "
+        "  if ($existing) { $existing | Remove-NetFirewallRule -ErrorAction SilentlyContinue; $removed += $r } "
+        "}; "
+        "@{ip=$ip; removed=$removed}"
+    )
+    data = _run_powershell_json_elevated(script, timeout_s=45.0)
+    if not isinstance(data, dict) or not data.get("ok"):
+        detail = ""
+        if isinstance(data, dict):
+            detail = str(data.get("detail") or data.get("error") or "")
+        return SecurityAudit(voice="No pude desbloquear esa IP (posible cancelacion de UAC).", detail=detail)
+
+    removed = []
+    try:
+        res = data.get("result") or {}
+        if isinstance(res, dict):
+            removed = res.get("removed") or []
+    except Exception:
+        removed = []
+    if removed:
+        voice = f"Listo. Quite el bloqueo para {ip}."
+    else:
+        voice = f"No vi reglas de bloqueo para {ip}."
+    return SecurityAudit(voice=voice, detail=json.dumps(data.get("result"), ensure_ascii=False, indent=2))
+
+
+def firewall_list_blocks() -> SecurityAudit:
+    """
+    Lists YUI-created firewall IP blocks (read-only but may require admin on some systems).
+    """
+    if not _is_windows():
+        return SecurityAudit(voice="Solo puedo listar reglas de firewall en Windows.")
+
+    script = "Get-NetFirewallRule -DisplayName 'YUI Block IP *' -ErrorAction SilentlyContinue | Select-Object DisplayName,Enabled,Direction,Action"
+    data = _run_powershell_json(script + " | ConvertTo-Json -Compress", timeout_s=12.0)
+    if data is None:
+        # Try elevated as fallback (some policies restrict reading firewall rules).
+        data = _run_powershell_json_elevated(script, timeout_s=30.0)
+        if isinstance(data, dict) and data.get("ok"):
+            data = data.get("result")
+
+    items = data
+    if isinstance(items, dict):
+        items = [items]
+    if not isinstance(items, list) or not items:
+        return SecurityAudit(voice="No hay bloqueos creados por YUI.")
+
+    details = ["[Bloqueos de IP (YUI)]"]
+    for it in items[:30]:
+        if not isinstance(it, dict):
+            continue
+        name = str(it.get("DisplayName") or "").strip()
+        enabled = bool(it.get("Enabled", False))
+        direction = str(it.get("Direction") or "").strip()
+        action = str(it.get("Action") or "").strip()
+        if name:
+            details.append(f"- {name} enabled={enabled} {direction} {action}")
+
+    return SecurityAudit(voice=f"Veo {len(items)} reglas de bloqueo de IP creadas por YUI.", detail="\n".join(details))
 
 
 def _copy_sqlite_db(src: Path) -> Optional[Path]:

@@ -75,7 +75,7 @@ class Settings:
     knn_max_distance: float = field(default_factory=lambda: _env_float("YUI_KNN_MAX_DISTANCE", 2.5))
 
     # Speech recognition
-    stt_language: str = field(default_factory=lambda: _env_str("YUI_STT_LANGUAGE", "es-ES"))
+    stt_language: str = field(default_factory=lambda: _env_str("YUI_STT_LANGUAGE", "es-CR"))
     listen_timeout_s: float = field(default_factory=lambda: _env_float("YUI_LISTEN_TIMEOUT_S", 5.0))
     phrase_time_limit_s: float = field(default_factory=lambda: _env_float("YUI_PHRASE_TIME_LIMIT_S", 8.0))
     stt_microphone_index: int = field(default_factory=lambda: _env_int("YUI_MIC_INDEX", -1))  # -1 = default
@@ -96,7 +96,7 @@ class Settings:
     tts_rate: int = field(default_factory=lambda: _env_int("YUI_TTS_RATE", 165))
     tts_volume: float = field(default_factory=lambda: _env_float("YUI_TTS_VOLUME", 1.0))
     tts_engine: str = field(default_factory=lambda: _env_str("YUI_TTS_ENGINE", "edge"))  # edge|pyttsx3|gtts
-    tts_voice: str = field(default_factory=lambda: _env_str("YUI_TTS_VOICE", "es-MX-DaliaNeural"))
+    tts_voice: str = field(default_factory=lambda: _env_str("YUI_TTS_VOICE", "es-CR-MariaNeural"))
     tts_edge_rate: str = field(default_factory=lambda: _env_str("YUI_TTS_EDGE_RATE", "+0%"))
     tts_edge_volume: str = field(default_factory=lambda: _env_str("YUI_TTS_EDGE_VOLUME", "+0%"))
     tts_edge_pitch: str = field(default_factory=lambda: _env_str("YUI_TTS_EDGE_PITCH", "+0Hz"))

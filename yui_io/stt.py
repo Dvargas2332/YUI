@@ -192,8 +192,8 @@ def _listen_speech_recognition(
 
     # Tune SR end-of-speech sensitivity (lower pause_threshold = faster stop).
     try:
-        recognizer.pause_threshold = float(os.getenv("YUI_SR_PAUSE_THRESHOLD", "0.6"))
-        recognizer.non_speaking_duration = float(os.getenv("YUI_SR_NON_SPEAKING_DURATION", "0.3"))
+        recognizer.pause_threshold = float(os.getenv("YUI_SR_PAUSE_THRESHOLD", "0.45"))
+        recognizer.non_speaking_duration = float(os.getenv("YUI_SR_NON_SPEAKING_DURATION", "0.25"))
     except Exception:
         pass
 
@@ -208,7 +208,8 @@ def _listen_speech_recognition(
             except Exception:
                 pass
 
-        print("Escuchando...")
+        if os.getenv("YUI_STT_PRINT_LISTENING", "0") not in {"0", "false", "False"}:
+            print("Escuchando...")
         try:
             audio = recognizer.listen(source, timeout=timeout_s, phrase_time_limit=phrase_time_limit_s)
         except Exception:
@@ -249,7 +250,7 @@ def _listen_sounddevice_google(*, language: str, timeout_s: float, duration_s: f
     max_wait_blocks = int(start_timeout_s / block_s)
     noise_blocks = max(1, int(os.getenv("YUI_SD_NOISE_BLOCKS", "3") or "3"))  # first blocks used to estimate ambient noise
     min_speech_blocks = max(1, int(os.getenv("YUI_SD_MIN_SPEECH_BLOCKS", "2") or "2"))  # must detect speech for >= blocks
-    trailing_silence_blocks = max(1, int(os.getenv("YUI_SD_TRAILING_SILENCE_BLOCKS", "5") or "5"))  # silence blocks to stop
+    trailing_silence_blocks = max(1, int(os.getenv("YUI_SD_TRAILING_SILENCE_BLOCKS", "4") or "4"))  # silence blocks to stop
 
     # Thresholds: relative to ambient noise with configurable floors (helps low-gain mics).
     speech_rms_min = max(1.0, float(os.getenv("YUI_SD_SPEECH_RMS_MIN", "120") or "120"))
@@ -278,7 +279,8 @@ def _listen_sounddevice_google(*, language: str, timeout_s: float, duration_s: f
 
         if debug:
             print(f"[YUI] STT(sounddevice): samplerate={samplerate} device={device_index}")
-        print("Escuchando...")
+        if os.getenv("YUI_STT_PRINT_LISTENING", "0") not in {"0", "false", "False"}:
+            print("Escuchando...")
         with sd.InputStream(**stream_kwargs) as stream:
             for i in range(max_blocks):
                 chunk, _overflowed = stream.read(block_frames)

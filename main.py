@@ -88,11 +88,8 @@ class YUI:
         self.vision_ai = VisionEngine() if settings.vision_enabled else None
 
         self._last_greeted_user: Optional[str] = None
-        self._last_gesture_spoken_ts = 0.0
         self._last_teach_ts = 0.0
         self._pending_teach: Optional[dict] = None
-        self._smile_prev = False
-        self._last_smile_spoken_ts = 0.0
 
         self.preview_enabled = os.getenv("YUI_PREVIEW", "1") not in {"0", "false", "False"}
         self._preview_width = int(self.settings.preview_width)
@@ -227,6 +224,29 @@ class YUI:
             f"size={self._preview_width}x{self._preview_height}"
         )
         try:
+            backend = (self.settings.stt_backend or "").strip()
+            lang = (self.settings.stt_language or "").strip()
+            wake = (self.settings.wake_word or "").strip() if self.settings.wake_word_enabled else "off"
+            sr_idx = int(self.settings.stt_microphone_index or -1)
+            sd_idx = int(self.settings.sounddevice_input_index or -1)
+            extra = ""
+            if backend in {"sounddevice", "auto"}:
+                try:
+                    import sounddevice as sd  # type: ignore
+
+                    if sd_idx >= 0:
+                        info = sd.query_devices(sd_idx)
+                    else:
+                        info = sd.query_devices(kind="input")
+                    name = str(info.get("name", "")).strip()
+                    if name:
+                        extra = f" ({name})"
+                except Exception:
+                    extra = ""
+            print(f"[YUI] STT: backend='{backend}' lang='{lang}' wake='{wake}' sr_mic={sr_idx} sd_dev={sd_idx}{extra}")
+        except Exception:
+            pass
+        try:
             if self.settings.mic_meter_enabled:
                 self._mic_meter.start()
             if os.getenv("YUI_UI_WS_ENABLED", "1") in {"1", "true", "True"}:
@@ -290,6 +310,14 @@ class YUI:
                     self.voice.voice_enabled = True
                     self.voice.speak("Listo. Vuelvo a escucharte.")
                     continue
+
+                # Confirmations must work even when desktop automation is disabled.
+                if self._desktop.confirm.pending is not None:
+                    res = self._desktop.maybe_handle(user_text, source=input_source)
+                    if res.handled:
+                        if res.reply:
+                            self._speak(res.reply)
+                        continue
 
                 # Hybrid brain: expand learned shortcuts before routing commands.
                 try:
@@ -1256,7 +1284,7 @@ class YUI:
                     cv2.rectangle(frame, (x0, y0), (x0 + int(w * lvl), y0 + h), (0, 255, 0), -1)
                     cv2.putText(frame, "MIC", (x0 + w + 10, y0 + h), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
 
-                if os.getenv("YUI_VISION_DEBUG", "1") not in {"0", "false", "False"}:
+                if os.getenv("YUI_VISION_DEBUG", "0") not in {"0", "false", "False"}:
                     # Filled later in loop (use last cached values to avoid flicker).
                     gtxt = ", ".join(last_gestures[:6]) if last_gestures else "-"
                     etxt = last_emotion or "-"
@@ -1315,37 +1343,10 @@ class YUI:
         self.voice.speak(f"Hola, {user_name}. Te veo. ¿En qué te ayudo?")
 
     def _maybe_react_to_gestures(self, gestures: List[str], *, user_name: Optional[str], smiling: bool) -> None:
-        if os.getenv("YUI_GESTURE_REACTIONS", "0") in {"0", "false", "False"}:
-            self._smile_prev = smiling
-            return
-        if not gestures:
-            # Still track smile state for edge-trigger.
-            self._smile_prev = smiling
-            return
-        now = time.time()
-        if now - self._last_gesture_spoken_ts < 4.0:
-            self._smile_prev = smiling
-            return
-
-        if "wave" in gestures:
-            self._last_gesture_spoken_ts = now
-            prefix = f"{user_name}, " if user_name else ""
-            self.voice.speak(f"{prefix}vi que me saludaste. Te escucho.")
-        elif "thumbs_up" in gestures:
-            self._last_gesture_spoken_ts = now
-            prefix = f"{user_name}, " if user_name else ""
-            self.voice.speak(f"{prefix}¡bien! Vi tu pulgar arriba.")
-        elif "open_palm" in gestures:
-            self._last_gesture_spoken_ts = now
-            prefix = f"{user_name}, " if user_name else ""
-            self.voice.speak(f"{prefix}vi tu mano abierta. ¿Qué necesitas?")
-        elif "peace" in gestures:
-            self._last_gesture_spoken_ts = now
-            prefix = f"{user_name}, " if user_name else ""
-            self.voice.speak(f"{prefix}vi el gesto de paz. Me gusta.")
-
-        # Never speak about smiles (too noisy). Keep state only.
-        self._smile_prev = smiling
+        # Avoid unsolicited voice reactions to gestures (too noisy and can be wrong on webcams).
+        # Gestures still flow into `VisualContext` for contextual tone/mood, and the user can ask explicitly.
+        _ = (gestures, user_name, smiling)
+        return
 
     def _infer_or_teach_emotion(self, vr, *, user_name: Optional[str]) -> Optional[str]:
         if not vr.face_present or vr.face_vector is None or vr.face_vector_labels is None:
