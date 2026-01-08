@@ -8,6 +8,7 @@ import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
+from urllib.parse import quote_plus
 
 from desktop.confirm import ConfirmGate
 from desktop.security_guard import guard_enabled, is_high_risk_path, is_suspicious_command, is_suspicious_url, normalize_url
@@ -58,7 +59,7 @@ class DesktopController:
         if low.startswith("busca "):
             q = t[6:].strip()
             if q:
-                url = "https://www.google.com/search?q=" + webbrowser.quote(q)  # type: ignore[attr-defined]
+                url = "https://www.google.com/search?q=" + quote_plus(q)
                 webbrowser.open(url)
                 return DesktopResult(handled=True, reply="Abro la búsqueda.")
             return DesktopResult(handled=True, reply="¿Qué quieres que busque?")
