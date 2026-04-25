@@ -1,0 +1,8 @@
+{
+  "id": "example-extension",
+  "name": "Extensión de ejemplo",
+  "version": "0.1.0",
+  "description": "Plantilla mínima para integraciones ligeras.",
+  "entrypoint": "extension.py",
+  "enabled": true
+}

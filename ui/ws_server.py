@@ -18,15 +18,19 @@ class UiWsServer:
     def __init__(self, bus: UiEventBus, *, config: WsConfig):
         self.bus = bus
         self.config = config
+        self.actual_port: int = config.port
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
+        self._ready = threading.Event()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        self._ready.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+        self._ready.wait(timeout=3.0)
 
     def stop(self) -> None:
         self._stop.set()
@@ -39,6 +43,7 @@ class UiWsServer:
             import websockets  # type: ignore
         except Exception:
             print("[YUI] UI WS: falta instalar websockets.")
+            self._ready.set()
             return
 
         clients: Set = set()
@@ -75,6 +80,8 @@ class UiWsServer:
         for _ in range(max_tries):
             try:
                 async with websockets.serve(handler, self.config.host, port):
+                    self.actual_port = port
+                    self._ready.set()
                     print(f"[YUI] UI WS: ws://{self.config.host}:{port}")
                     await broadcaster()
                     return
@@ -84,6 +91,7 @@ class UiWsServer:
                 port += 1
                 continue
 
+        self._ready.set()
         if last_error is not None:
             print(f"[YUI] UI WS: no pude iniciar servidor (último error: {last_error})")
 

@@ -1,0 +1,8 @@
+{
+  "id": "example-plugin",
+  "name": "Plugin de ejemplo",
+  "version": "0.1.0",
+  "description": "Plantilla mínima para futuras integraciones del agente.",
+  "entrypoint": "plugin.py",
+  "enabled": true
+}

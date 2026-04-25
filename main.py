@@ -9,8 +9,8 @@ os.environ.setdefault("ABSL_MIN_LOG_LEVEL", "2")
 try:
     from absl import logging as absl_logging  # type: ignore
 
-    absl_logging.set_verbosity(absl_logging.ERROR)
-    absl_logging.set_stderrthreshold("error")
+    absl_logging.set_verbosity(absl_logging.ERROR)  # type: ignore[union-attr]
+    absl_logging.set_stderrthreshold("error")  # type: ignore[union-attr]
 except Exception:
     pass
 
@@ -20,13 +20,14 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from dotenv import load_dotenv
 
-from config.settings import Settings
+from config.settings import PROJECT_ROOT, Settings
 from core.brain import VisualContext
 from core.hybrid_brain import HybridBrain
+from core.integrations import IntegrationCatalog
 from core.face_authentication import FaceAuthenticator
 from core.memory import MemoryStore
 from core.perception_classifier import infer_emotion_from_blendshapes, knn_classify, parse_vectors
@@ -39,10 +40,12 @@ from desktop.screen_context import active_window_summary, capture_screen_embeddi
 from desktop.security_watch import SecurityWatch
 from ui.ws_events import UiEventBus
 from ui.ws_server import UiWsServer, WsConfig
+from ui.http_server import UiHttpServer
 from yui_io.text_input import TextInput
 from desktop.tasks import DesktopTask
 from desktop.task_recorder import TaskRecorder
 from utils.crash_log import install_crash_logging
+from utils.env_store import set_env_value
 from utils.single_instance import acquire_single_instance_lock
 from utils.system_profile import derive_tuning, load_or_collect_profile, refresh_profile, summarize_profile
 
@@ -64,10 +67,14 @@ class VisionState:
 class YUI:
     def __init__(self, settings: Settings):
         self.settings = settings
+        self._text_only_mode = bool(getattr(settings, "agent_text_only", False))
+        self._voice_enabled = bool(getattr(settings, "voice_enabled", True)) and not self._text_only_mode
+        self._vision_enabled = bool(settings.vision_enabled) and not self._text_only_mode
         self.ui_bus = UiEventBus()
         self.voice = VoiceAssistant(settings, ui_bus=self.ui_bus)
         self.memory = MemoryStore(settings.memory_db_path)
         self.brain = HybridBrain(settings, self.memory)
+        self.catalog = IntegrationCatalog(PROJECT_ROOT)
 
         self._vision_state = VisionState(gestures=[])
         self._vision_lock = threading.Lock()
@@ -81,21 +88,21 @@ class YUI:
                 height=settings.camera_height,
                 fourcc=settings.camera_fourcc,
             )
-            if settings.vision_enabled
+            if self._vision_enabled
             else None
         )
-        self.face_auth = FaceAuthenticator(models_dir=settings.models_dir, known_faces_dir=settings.known_faces_dir) if settings.vision_enabled else None
-        self.vision_ai = VisionEngine() if settings.vision_enabled else None
+        self.face_auth = FaceAuthenticator(models_dir=settings.models_dir, known_faces_dir=settings.known_faces_dir) if self._vision_enabled else None
+        self.vision_ai = VisionEngine() if self._vision_enabled else None
 
         self._last_greeted_user: Optional[str] = None
         self._last_teach_ts = 0.0
-        self._pending_teach: Optional[dict] = None
+        self._pending_teach: Optional[Dict[str, Any]] = None
 
-        self.preview_enabled = os.getenv("YUI_PREVIEW", "1") not in {"0", "false", "False"}
+        self.preview_enabled = (os.getenv("YUI_PREVIEW", "1") not in {"0", "false", "False"}) and self._vision_enabled
         self._preview_width = int(self.settings.preview_width)
         self._preview_height = int(self.settings.preview_height)
         self._vision_every_n_frames = int(self.settings.vision_process_every_n_frames)
-        self._profile: Optional[dict] = None
+        self._profile: Optional[Dict[str, Any]] = None
         self._tuning_tier = "unknown"
         self._llm_configured = bool((self.settings.llm_api_key or "").strip())
         self._mic_meter = MicMeter(device_index=self.settings.sounddevice_input_index)
@@ -104,13 +111,15 @@ class YUI:
             confirm_on_request=self._on_confirm_request,
             confirm_on_clear=self._on_confirm_clear,
         )
-        self._sec_watch = SecurityWatch(ui_bus=self.ui_bus, speak=lambda msg: self.voice.speak(msg))
+        self._sec_watch = SecurityWatch(ui_bus=self.ui_bus, speak=lambda msg: self._speak(msg))
         self._ui_ws = None
+        self._ui_http = None
         self._text_in = TextInput()
+        self._ui_q: "queue.Queue[str]" = queue.Queue()
         self._voice_q: "queue.Queue[str]" = queue.Queue()
         self._voice_thread: Optional[threading.Thread] = None
-        self._task_learning: Optional[dict] = None
-        self._task_running: Optional[dict] = None
+        self._task_learning: Optional[Dict[str, Any]] = None
+        self._task_running: Optional[Dict[str, Any]] = None
         self._task_recorder = TaskRecorder()
         self._vision_thread: Optional[threading.Thread] = None
         self._preview_lock = threading.Lock()
@@ -126,7 +135,7 @@ class YUI:
 
         self._init_runtime_profile()
 
-    def _on_confirm_request(self, pending) -> None:  # noqa: ANN001
+    def _on_confirm_request(self, pending: Any) -> None:
         # Always display the code in the console/UI so we can avoid speaking it if desired.
         try:
             timeout_s = float(getattr(self._desktop.confirm, "timeout_s", 60.0))
@@ -161,7 +170,7 @@ class YUI:
         except Exception:
             pass
 
-    def _on_confirm_clear(self, pending) -> None:  # noqa: ANN001
+    def _on_confirm_clear(self, pending: Any) -> None:
         try:
             self.ui_bus.publish("confirm", {"state": "cleared", "nonce": getattr(pending, "nonce", None)})
         except Exception:
@@ -171,6 +180,10 @@ class YUI:
         spoken = (text or "").strip()
         if not spoken:
             return
+        try:
+            self.ui_bus.publish("assistant", {"text": spoken, "mood": mood})
+        except Exception:
+            pass
 
         # Optionally avoid reading confirmation codes aloud; they are always printed + sent to UI.
         speak_code = os.getenv("YUI_CONFIRM_SPEAK_CODE", "1") not in {"0", "false", "False"}
@@ -193,6 +206,156 @@ class YUI:
                         spoken = f"{spoken} Mira el código en pantalla."
 
         self.voice.speak(spoken, mood=mood)
+
+    def _enqueue_ui_command(self, text: str) -> bool:
+        cmd = (text or "").strip()
+        if not cmd:
+            return False
+        self._ui_q.put(cmd)
+        return True
+
+    def _toggle_runtime_flag(self, key: str, value: bool) -> Dict[str, Any]:
+        allowed = {
+            "YUI_DESKTOP_ENABLED",
+            "YUI_SECURITY_GUARD",
+            "YUI_SECURITY_WATCH_ENABLED",
+            "YUI_CONFIRM_VOICE_ONLY",
+            "YUI_CONFIRM_UI_ALLOWED",
+            "YUI_CONFIRM_TEXT_ARM_ENABLED",
+            "YUI_DESKTOP_CONFIRM_POINTER",
+            "YUI_MACROS_ENABLED",
+            "YUI_STYLE_ENABLED",
+            "YUI_TEACHING_MODE",
+        }
+        key = (key or "").strip()
+        if key not in allowed:
+            return {"ok": False, "error": "unsupported_key"}
+
+        os.environ[key] = "1" if value else "0"
+        set_env_value(PROJECT_ROOT / ".env", key, "1" if value else "0")
+
+        if key == "YUI_SECURITY_WATCH_ENABLED":
+            self._sec_watch.enabled = bool(value)
+            if value:
+                try:
+                    self._sec_watch.start()
+                except Exception:
+                    pass
+            else:
+                try:
+                    self._sec_watch.stop()
+                except Exception:
+                    pass
+        if key == "YUI_STYLE_ENABLED":
+            self.brain.style.enabled = bool(value)
+        if key == "YUI_MACROS_ENABLED":
+            self.brain.macros.enabled = bool(value)
+        if key == "YUI_TEACHING_MODE":
+            self.brain.teaching.enabled = bool(value)
+
+        try:
+            self.ui_bus.publish("status", {"toggle": key, "value": bool(value)})
+        except Exception:
+            pass
+        return {"ok": True, "key": key, "value": bool(value)}
+
+    def _handle_config(self, updates: Dict[str, str]) -> Dict[str, Any]:
+        env_path = PROJECT_ROOT / ".env"
+        saved: List[str] = []
+        for key, value in updates.items():
+            os.environ[key] = value
+            set_env_value(env_path, key, value)
+            saved.append(key)
+            if key == "YUI_SYSTEM_PROMPT_OVERRIDE":
+                try:
+                    self.brain.set_system_prompt(value)
+                except Exception:
+                    pass
+        return {"ok": True, "saved": saved}
+
+    def _get_ui_text(self) -> Optional[str]:
+        try:
+            return self._ui_q.get_nowait()
+        except queue.Empty:
+            return None
+
+    def _ui_bootstrap(self) -> Dict[str, Any]:
+        tasks: List[Dict[str, Any]] = []
+        for name in self.memory.list_desktop_tasks(limit=50):
+            raw = self.memory.get_desktop_task(name=name)
+            task = DesktopTask.from_json(raw) if raw else None
+            tasks.append(
+                {
+                    "name": name,
+                    "steps": list(task.steps) if task else [],
+                    "step_count": len(task.steps) if task else 0,
+                }
+            )
+
+        history: List[Dict[str, Any]] = []
+        for _msg_id, item in reversed(self.memory.recent_with_ids(limit=24)):
+            history.append({"role": item.role, "content": item.content, "created_at": item.created_at})
+
+        pending = getattr(self._desktop.confirm, "pending", None)
+        confirmation = None
+        if pending is not None:
+            confirmation = {  # type: ignore[assignment]
+                "code": getattr(pending, "code", None),
+                "description": getattr(pending, "description", None),
+                "created_at": float(getattr(pending, "created_at", 0.0) or 0.0),
+                "timeout_s": float(getattr(self._desktop.confirm, "timeout_s", 60.0) or 60.0),
+            }
+
+        style_prof = self.brain.style.profile.normalize()
+        rules: Dict[str, Any] = {
+            "style_enabled": bool(self.brain.style.enabled),
+            "max_sentences": int(style_prof.max_sentences),
+            "banned_phrases": list(style_prof.banned_phrases),
+            "teaching_mode": bool(getattr(self.brain.teaching, "enabled", False)),
+            "macros_enabled": bool(getattr(self.brain.macros, "enabled", True)),
+            "macros": [{"trigger": trigger, "action": action} for trigger, action in self.memory.list_macros(limit=40)],
+        }
+
+        prompts: Dict[str, Any] = {
+            "llm_mode": self.settings.llm_mode,
+            "llm_model": self.settings.llm_model,
+            "llm_model_fast": self.settings.llm_model_fast,
+            "llm_model_deep": self.settings.llm_model_deep,
+            "llm_temperature": float(self.settings.llm_temperature),
+            "llm_deep_temperature": float(self.settings.llm_deep_temperature),
+            "llm_base_url": self.settings.llm_base_url,
+        }
+
+        permissions = {
+            "desktop_enabled": os.getenv("YUI_DESKTOP_ENABLED", "0") in {"1", "true", "True"},
+            "security_guard": os.getenv("YUI_SECURITY_GUARD", "0") in {"1", "true", "True"},
+            "security_watch": os.getenv("YUI_SECURITY_WATCH_ENABLED", "0") in {"1", "true", "True"},
+            "confirm_voice_only": os.getenv("YUI_CONFIRM_VOICE_ONLY", "1") in {"1", "true", "True"},
+            "confirm_ui_allowed": os.getenv("YUI_CONFIRM_UI_ALLOWED", "0") in {"1", "true", "True"},
+            "confirm_text_arm_enabled": os.getenv("YUI_CONFIRM_TEXT_ARM_ENABLED", "1") in {"1", "true", "True"},
+            "confirm_pointer": os.getenv("YUI_DESKTOP_CONFIRM_POINTER", "1") in {"1", "true", "True"},
+            "require_face_auth": bool(self.settings.require_face_auth),
+        }
+
+        ws_port = self._ui_ws.actual_port if self._ui_ws is not None else int(os.getenv("YUI_UI_WS_PORT", "8765"))
+        return {
+            "agent_state": "ready",
+            "ws_port": ws_port,
+            "mode": {
+                "input": "text" if self._text_only_mode else "hybrid",
+                "voice": self._voice_enabled,
+                "vision": self._vision_enabled,
+                "desktop": os.getenv("YUI_DESKTOP_ENABLED", "0") in {"1", "true", "True"},
+            },
+            "tasks": tasks,
+            "history": history,
+            "confirmation": confirmation,
+            "rules": rules,
+            "prompts": prompts,
+            "permissions": permissions,
+            "catalog": self.catalog.summary(),
+            "system_prompt": self.brain.get_system_prompt(),
+        }
 
     def _init_runtime_profile(self) -> None:
         if os.getenv("YUI_ENV_PROFILE", "1") in {"0", "false", "False"}:
@@ -235,10 +398,10 @@ class YUI:
                     import sounddevice as sd  # type: ignore
 
                     if sd_idx >= 0:
-                        info = sd.query_devices(sd_idx)
+                        info = sd.query_devices(sd_idx)  # type: ignore[no-untyped-call]
                     else:
-                        info = sd.query_devices(kind="input")
-                    name = str(info.get("name", "")).strip()
+                        info = sd.query_devices(kind="input")  # type: ignore[no-untyped-call]
+                    name = str(info.get("name", "")).strip()  # type: ignore[union-attr]
                     if name:
                         extra = f" ({name})"
                 except Exception:
@@ -247,7 +410,7 @@ class YUI:
         except Exception:
             pass
         try:
-            if self.settings.mic_meter_enabled:
+            if self.settings.mic_meter_enabled and self._voice_enabled:
                 self._mic_meter.start()
             if os.getenv("YUI_UI_WS_ENABLED", "1") in {"1", "true", "True"}:
                 host = os.getenv("YUI_UI_WS_HOST", "127.0.0.1")
@@ -255,10 +418,25 @@ class YUI:
                 self._ui_ws = UiWsServer(self.ui_bus, config=WsConfig(host=host, port=port))
                 self._ui_ws.start()
                 self.ui_bus.publish("status", {"ui_ws": True, "host": host, "port": port})
+            if self.settings.ui_http_enabled:
+                self._ui_http = UiHttpServer(
+                    host=self.settings.ui_http_host,
+                    port=int(self.settings.ui_http_port),
+                    static_root=PROJECT_ROOT / "ui" / "web",
+                    on_command=self._enqueue_ui_command,
+                    get_state=self._ui_bootstrap,
+                    on_toggle=self._toggle_runtime_flag,
+                    on_config=self._handle_config,
+                )
+                self._ui_http.start()
+                self.ui_bus.publish(
+                    "status",
+                    {"ui_http": True, "host": self.settings.ui_http_host, "port": int(self.settings.ui_http_port)},
+                )
             if not self._llm_configured:
                 print("[YUI] LLM no configurado: falta YUI_LLM_API_KEY / DEEPSEEK_API_KEY.")
                 print(f"[YUI] base_url={self.settings.llm_base_url!r} model={self.settings.llm_model!r}")
-                self.voice.speak("Estoy lista, pero no tengo conexión al modelo. Revisa tu API key.")
+                self._speak("Estoy lista, pero no tengo conexión al modelo. Revisa tu API key.")
             else:
                 print("[YUI] LLM configurado.")
                 print(f"[YUI] base_url={self.settings.llm_base_url!r} model={self.settings.llm_model!r}")
@@ -266,21 +444,22 @@ class YUI:
                     ok = self.brain.health_check()
                     print(f"[YUI] LLM self-test: {'OK' if ok else 'FAIL'}")
                     if ok:
-                        self.voice.speak("Estoy lista.")
+                        self._speak("Estoy lista.")
                     else:
-                        self.voice.speak("Estoy lista, pero la IA no está respondiendo. Revisa la consola.")
+                        self._speak("Estoy lista, pero la IA no está respondiendo. Revisa la consola.")
                 else:
-                    self.voice.speak("Estoy lista.")
+                    self._speak("Estoy lista.")
 
-            if self.settings.vision_enabled:
+            if self._vision_enabled:
                 self._vision_thread = threading.Thread(target=self._vision_loop, daemon=True, name="yui-vision")
                 self._vision_thread.start()
-            else:
-                self.voice.speak("Hoy estoy en modo solo voz.")
+            elif self._voice_enabled:
+                self._speak("Hoy estoy en modo solo voz.")
 
             # Start console input after initialization logs to avoid mixing prompt with status prints.
             self._text_in.start()
-            self._start_voice_thread()
+            if self._voice_enabled:
+                self._start_voice_thread()
             if os.getenv("YUI_SECURITY_WATCH_ENABLED", "1") not in {"0", "false", "False"}:
                 try:
                     self._sec_watch.start()
@@ -293,6 +472,10 @@ class YUI:
                 user_text = self._text_in.get()
                 input_source = "text"
                 if not user_text:
+                    user_text = self._get_ui_text()
+                    if user_text:
+                        input_source = "ui"
+                if not user_text:
                     user_text = self._get_voice_text()
                     if user_text:
                         input_source = "voice"
@@ -302,13 +485,13 @@ class YUI:
 
                 # Voice toggle commands
                 low = user_text.strip().lower()
-                if low in {"no escuches", "no me escuches", "deja de escuchar"}:
+                if self._voice_enabled and low in {"no escuches", "no me escuches", "deja de escuchar"}:
                     self.voice.voice_enabled = False
-                    self.voice.speak("De acuerdo. Desactivo el micrófono.")
+                    self._speak("De acuerdo. Desactivo el micrófono.")
                     continue
-                if low in {"escucha", "ya puedes escuchar", "vuelve a escuchar"}:
+                if self._voice_enabled and low in {"escucha", "ya puedes escuchar", "vuelve a escuchar"}:
                     self.voice.voice_enabled = True
-                    self.voice.speak("Listo. Vuelvo a escucharte.")
+                    self._speak("Listo. Vuelvo a escucharte.")
                     continue
 
                 # Confirmations must work even when desktop automation is disabled.
@@ -370,8 +553,8 @@ class YUI:
                             self._speak(res.reply)
                         continue
 
-                if self.settings.require_face_auth and not self._is_authenticated():
-                    self.voice.speak("Necesito verte para continuar. Mira a la cámara, por favor.")
+                if self._vision_enabled and self.settings.require_face_auth and not self._is_authenticated():
+                    self._speak("Necesito verte para continuar. Mira a la cámara, por favor.")
                     continue
 
                 visual = self._get_visual_context()
@@ -443,6 +626,11 @@ class YUI:
         except Exception:
             pass
         try:
+            if self._ui_http is not None:
+                self._ui_http.stop()
+        except Exception:
+            pass
+        try:
             self._sec_watch.stop()
         except Exception:
             pass
@@ -452,7 +640,8 @@ class YUI:
         except Exception:
             pass
         try:
-            self._mic_meter.stop()
+            if self._voice_enabled:
+                self._mic_meter.stop()
         except Exception:
             pass
         try:
@@ -622,8 +811,8 @@ class YUI:
                 try:
                     import sounddevice as sd  # type: ignore
 
-                    info = sd.query_devices(sd_idx)
-                    name = str(info.get("name", "")).strip()
+                    info = sd.query_devices(sd_idx)  # type: ignore[no-untyped-call]
+                    name = str(info.get("name", "")).strip()  # type: ignore[union-attr]
                     if name:
                         extra = f" ({name})"
                 except Exception:
@@ -989,7 +1178,7 @@ class YUI:
         except Exception:
             pass
 
-        def _step(name: str, fn):  # noqa: ANN001
+        def _step(name: str, fn: Callable[[], Any]) -> Optional[str]:
             if self._stop.is_set() or self._auto_analysis_cancel.is_set():
                 return None
             try:
@@ -1125,6 +1314,9 @@ class YUI:
                 return "No estoy aprendiendo ninguna tarea."
             name = self._task_learning["name"]
             steps = self._task_learning["steps"]
+            if not steps:
+                self._task_learning = None
+                return "No capturé pasos. Intenta de nuevo."
             task = DesktopTask(name=name, steps=steps)
             self.memory.upsert_desktop_task(name=name, task_json=task.to_json())
             self._task_learning = None
@@ -1171,10 +1363,10 @@ class YUI:
         if res.handled:
             if res.reply:
                 # If confirmation succeeded, continue remaining steps.
-                if self._desktop.confirm.pending is None and self._task_running is not None:
+                if self._desktop.confirm.pending is None and self._task_running is not None:  # type: ignore[comparison-overlap]
                     return self._run_task_steps_until_pause()
                 return res.reply
-            if self._desktop.confirm.pending is None and self._task_running is not None:
+            if self._desktop.confirm.pending is None and self._task_running is not None:  # type: ignore[comparison-overlap]
                 return self._run_task_steps_until_pause()
             return "Ok."
         return None
@@ -1247,9 +1439,9 @@ class YUI:
         every_n = max(1, int(self._vision_every_n_frames or 1))
 
         while not self._stop.is_set():
-            frame = self.camera.get_frame()
-            if frame is None:
-                if self.camera.cap is None:
+            frame = self.camera.get_frame()  # type: ignore[assignment]
+            if frame is None:  # type: ignore[comparison-overlap]
+                if self.camera.cap is None:  # type: ignore[comparison-overlap]
                     print("[YUI] Cámara perdida (cap released).")
                     self.voice.speak("Perdí acceso a la cámara. Sigo en modo voz.")
                     return
@@ -1258,15 +1450,15 @@ class YUI:
 
             if self.settings.camera_swap_rb:
                 try:
-                    frame = frame[:, :, ::-1]
+                    frame = frame[:, :, ::-1]  # type: ignore[index]
                 except Exception:
                     pass
 
             # Overlay de diagnóstico para confirmar que el frame se actualiza.
             try:
                 ts = time.strftime("%H:%M:%S")
-                cv2.putText(
-                    frame,
+                cv2.putText(  # type: ignore[call-overload]
+                    frame,  # type: ignore[arg-type]
                     f"YUI {ts}",
                     (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX,
@@ -1280,16 +1472,16 @@ class YUI:
                     w = 140
                     h = 12
                     x0, y0 = 10, 50
-                    cv2.rectangle(frame, (x0, y0), (x0 + w, y0 + h), (80, 80, 80), 2)
-                    cv2.rectangle(frame, (x0, y0), (x0 + int(w * lvl), y0 + h), (0, 255, 0), -1)
-                    cv2.putText(frame, "MIC", (x0 + w + 10, y0 + h), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
+                    cv2.rectangle(frame, (x0, y0), (x0 + w, y0 + h), (80, 80, 80), 2)  # type: ignore[call-overload, arg-type]
+                    cv2.rectangle(frame, (x0, y0), (x0 + int(w * lvl), y0 + h), (0, 255, 0), -1)  # type: ignore[call-overload, arg-type]
+                    cv2.putText(frame, "MIC", (x0 + w + 10, y0 + h), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)  # type: ignore[call-overload, arg-type]
 
                 if os.getenv("YUI_VISION_DEBUG", "0") not in {"0", "false", "False"}:
                     # Filled later in loop (use last cached values to avoid flicker).
                     gtxt = ", ".join(last_gestures[:6]) if last_gestures else "-"
                     etxt = last_emotion or "-"
-                    cv2.putText(frame, f"GEST: {gtxt}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)
-                    cv2.putText(frame, f"EMO: {etxt}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)
+                    cv2.putText(frame, f"GEST: {gtxt}", (10, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)  # type: ignore[call-overload, arg-type]
+                    cv2.putText(frame, f"EMO: {etxt}", (10, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)  # type: ignore[call-overload, arg-type]
             except Exception:
                 pass
 
@@ -1300,7 +1492,7 @@ class YUI:
                     user_name, conf = self.face_auth.authenticate(frame)
                 gestures = []
                 if self.vision_ai is not None and getattr(self.vision_ai, "enabled", False):
-                    vr = self.vision_ai.process(frame)
+                    vr = self.vision_ai.process(frame)  # type: ignore[union-attr]
                     gestures = list(vr.gestures)
                     last_smile = bool(vr.smile)
                     last_emotion = self._infer_or_teach_emotion(vr, user_name=user_name)
@@ -1322,16 +1514,16 @@ class YUI:
 
             if self.preview_enabled:
                 try:
-                    preview = cv2.resize(frame, (int(self._preview_width), int(self._preview_height)))
+                    preview = cv2.resize(frame, (int(self._preview_width), int(self._preview_height)))  # type: ignore[call-overload, arg-type]
                 except Exception:
                     try:
-                        preview = frame.copy()
+                        preview = frame.copy()  # type: ignore[union-attr]
                     except Exception:
-                        preview = frame
+                        preview = frame  # type: ignore[assignment]
                 with self._preview_lock:
                     self._preview_frame = preview
 
-        if self.camera is not None:
+        if self.camera is not None:  # type: ignore[comparison-overlap]
             self.camera.release()
 
     def _maybe_greet(self, user_name: Optional[str], conf: float) -> None:
@@ -1348,7 +1540,7 @@ class YUI:
         _ = (gestures, user_name, smiling)
         return
 
-    def _infer_or_teach_emotion(self, vr, *, user_name: Optional[str]) -> Optional[str]:
+    def _infer_or_teach_emotion(self, vr: Any, *, user_name: Optional[str]) -> Optional[str]:
         if not vr.face_present or vr.face_vector is None or vr.face_vector_labels is None:
             return None
 
@@ -1379,7 +1571,7 @@ class YUI:
 
         return None
 
-    def _infer_or_teach_hand(self, vr, gestures: List[str], *, user_name: Optional[str]) -> List[str]:
+    def _infer_or_teach_hand(self, vr: Any, gestures: List[str], *, user_name: Optional[str]) -> List[str]:
         # If we already have a known gesture, keep it.
         if gestures:
             return gestures

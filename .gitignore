@@ -16,3 +16,6 @@ __pycache__/
 venv_yui/
 known_faces/
 models/
+vscode-extension/
+ui/web/
+data/

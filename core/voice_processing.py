@@ -17,7 +17,7 @@ class VoiceAssistant:
         self.settings = settings
         self._speak_lock = threading.Lock()
         self._ui_bus = ui_bus
-        self.voice_enabled = True
+        self.voice_enabled = bool(getattr(settings, "voice_enabled", True)) and not bool(getattr(settings, "agent_text_only", False))
         self._mic_available = (
             microphone_available_speech_recognition(microphone_index=self.settings.stt_microphone_index)
             or microphone_available_sounddevice(device_index=self.settings.sounddevice_input_index)
@@ -126,7 +126,7 @@ class VoiceAssistant:
 
     def speak(self, text: str, *, mood: Optional[str] = None) -> None:
         text = (text or "").strip()
-        if not text:
+        if not text or not self.voice_enabled:
             return
 
         edge_rate = self.settings.tts_edge_rate

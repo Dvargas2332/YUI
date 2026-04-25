@@ -52,6 +52,8 @@ def _env_path(name: str, default: Path) -> Path:
 class Settings:
     # NOTE: use default_factory so env vars are read at instantiation time
     # (after `load_dotenv()`), not at import time.
+    agent_text_only: bool = field(default_factory=lambda: _env_bool("YUI_AGENT_TEXT_ONLY", False))
+    voice_enabled: bool = field(default_factory=lambda: _env_bool("YUI_VOICE_ENABLED", True))
     camera_index: int = field(default_factory=lambda: _env_int("YUI_CAMERA_INDEX", 0))  # -1 = auto-scan
     camera_backend: str = field(default_factory=lambda: _env_str("YUI_CAMERA_BACKEND", "dshow"))  # dshow|msmf|any
     camera_fourcc: str = field(default_factory=lambda: _env_str("YUI_CAMERA_FOURCC", ""))  # e.g. MJPG, YUY2
@@ -116,6 +118,9 @@ class Settings:
     llm_deep_temperature: float = field(default_factory=lambda: _env_float("YUI_LLM_DEEP_TEMPERATURE", 0.2))
     llm_max_tokens: int = field(default_factory=lambda: _env_int("YUI_LLM_MAX_TOKENS", 240))
     strip_stage_directions: bool = field(default_factory=lambda: _env_bool("YUI_STRIP_STAGE_DIRECTIONS", True))
+    ui_http_enabled: bool = field(default_factory=lambda: _env_bool("YUI_HTTP_UI_ENABLED", True))
+    ui_http_host: str = field(default_factory=lambda: _env_str("YUI_HTTP_UI_HOST", "127.0.0.1"))
+    ui_http_port: int = field(default_factory=lambda: _env_int("YUI_HTTP_UI_PORT", 8080))
 
     # Memory
     memory_db_path: Path = field(default_factory=lambda: _env_path("YUI_MEMORY_DB_PATH", PROJECT_ROOT / "data" / "user_data.db"))

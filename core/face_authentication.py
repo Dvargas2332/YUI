@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import cv2
@@ -37,8 +37,8 @@ class FaceAuthenticator:
         if not self.enabled:
             return
 
-        cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"
-        self._face_cascade = cv2.CascadeClassifier(str(cascade_path))
+        cascade_path = Path(cv2.data.haarcascades) / "haarcascade_frontalface_default.xml"  # type: ignore[union-attr]
+        self._face_cascade = cv2.CascadeClassifier(str(cascade_path))  # type: ignore[union-attr]
         if self._face_cascade.empty():
             self.enabled = False
             return
@@ -65,7 +65,7 @@ class FaceAuthenticator:
         if not directory_path.exists():
             return
 
-        images: List = []
+        images: List[Any] = []
         labels: List[int] = []
         self._label_to_name = {}
 
@@ -77,7 +77,7 @@ class FaceAuthenticator:
             name = os.path.splitext(filename)[0]
             path = directory_path / filename
             img = cv2.imread(str(path))
-            if img is None:
+            if img is None:  # type: ignore[comparison-overlap]
                 continue
 
             face = self._extract_face_gray(img)
@@ -95,7 +95,7 @@ class FaceAuthenticator:
         labels_np = np.array(labels, dtype=np.int32)
         self._recognizer.train(images, labels_np)
 
-    def authenticate(self, frame) -> Tuple[Optional[str], float]:
+    def authenticate(self, frame: Any) -> Tuple[Optional[str], float]:
         """
         Retorna: (nombre_usuario, confianza) o (None, 0) si no coincide.
         """
@@ -123,7 +123,7 @@ class FaceAuthenticator:
 
         return None, 0.0
 
-    def register_new_face(self, frame, user_id: str) -> None:
+    def register_new_face(self, frame: Any, user_id: str) -> None:
         if not self.enabled or cv2 is None:
             return
 
@@ -133,15 +133,15 @@ class FaceAuthenticator:
 
         self._known_faces_dir.mkdir(parents=True, exist_ok=True)
         out_path = self._known_faces_dir / f"{user_id}.jpg"
-        cv2.imwrite(str(out_path), face)
+        cv2.imwrite(str(out_path), face)  # type: ignore[union-attr]
         self.load_known_faces(self._known_faces_dir)
 
-    def _extract_face_bgr(self, frame):
+    def _extract_face_bgr(self, frame: Any) -> Optional[Any]:
         if cv2 is None or self._face_cascade is None:
             return None
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self._face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # type: ignore[union-attr]
+        faces = self._face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))  # type: ignore[arg-type]
         if len(faces) == 0:
             return None
 
@@ -150,12 +150,11 @@ class FaceAuthenticator:
         face_bgr = frame[y : y + h, x : x + w]
         return face_bgr
 
-    def _extract_face_gray(self, frame):
+    def _extract_face_gray(self, frame: Any) -> Any:
         if cv2 is None:
             return None
         face_bgr = self._extract_face_bgr(frame)
         if face_bgr is None:
             return None
-        gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)
-        gray = cv2.resize(gray, (200, 200))
-        return gray
+        gray = cv2.cvtColor(face_bgr, cv2.COLOR_BGR2GRAY)  # type: ignore[union-attr]
+        return cv2.resize(gray, (200, 200))  # type: ignore[union-attr]

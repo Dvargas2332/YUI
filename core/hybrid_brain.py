@@ -43,7 +43,7 @@ class StyleProfile:
 
     def normalize(self) -> "StyleProfile":
         banned: List[str] = []
-        seen = set()
+        seen: set[str] = set()
         for p in self.banned_phrases:
             s = (p or "").strip()
             if not s:
@@ -77,7 +77,7 @@ class StylePolicy:
             try:
                 obj = json.loads(banned_raw)
                 if isinstance(obj, list):
-                    banned = [str(x) for x in obj if isinstance(x, (str, int, float)) and str(x).strip()]
+                    banned = [str(x) for x in obj if isinstance(x, (str, int, float)) and str(x).strip()]  # type: ignore[union-attr]
             except Exception:
                 banned = []
         if not banned:
@@ -310,6 +310,12 @@ class HybridBrain:
     def last_mode(self) -> str:
         return getattr(self.llm, "last_mode", "fast")
 
+    def get_system_prompt(self) -> str:
+        return self.llm.get_system_prompt()
+
+    def set_system_prompt(self, prompt: str) -> None:
+        self.llm.set_system_prompt(prompt)
+
     def route(self, user_text: str) -> Tuple[str, float, str]:
         return self.llm.route(user_text)
 
@@ -360,7 +366,7 @@ class HybridBrain:
             return macro_train
 
         # 3) LLM (with local policy prompt + postprocess enforcement)
-        extra_parts = []
+        extra_parts: List[str] = []
         style_prompt = self.style.system_prompt()
         if style_prompt:
             extra_parts.append(style_prompt)

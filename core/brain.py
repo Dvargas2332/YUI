@@ -58,6 +58,13 @@ class Brain:
         self._postprocess_q: Queue[Optional[str]] = Queue()
         if self.settings.memory_async:
             threading.Thread(target=self._postprocess_worker, daemon=True).start()
+        self._system_prompt_override: Optional[str] = None
+
+    def get_system_prompt(self) -> str:
+        return self._system_prompt_override or SYSTEM_PROMPT
+
+    def set_system_prompt(self, prompt: str) -> None:
+        self._system_prompt_override = prompt.strip() or None
 
     def route(self, user_text: str) -> Tuple[str, float, str]:
         """
@@ -121,9 +128,27 @@ class Brain:
                 client.models.list()
                 return True
             except Exception as e2:
-                print(f"[YUI] LLM health_check failed: {type(e).__name__}: {e}")
-                print(f"[YUI] LLM health_check failed (retry): {type(e2).__name__}: {e2}")
-                return False
+                try:
+                    return self._health_check_requests()
+                except Exception as e3:
+                    print(f"[YUI] LLM health_check failed: {type(e).__name__}: {e}")
+                    print(f"[YUI] LLM health_check failed (retry): {type(e2).__name__}: {e2}")
+                    print(f"[YUI] LLM health_check failed (requests): {type(e3).__name__}: {e3}")
+                    return False
+
+    def _health_check_requests(self) -> bool:
+        base = self.settings.llm_base_url.rstrip("/")
+        if not base.endswith("/v1") and "/v1/" not in (base + "/"):
+            base = f"{base}/v1"
+        url = f"{base}/models"
+        if self._is_mimo():
+            headers = {"api-key": self.settings.llm_api_key}
+        else:
+            headers = {"Authorization": f"Bearer {self.settings.llm_api_key}"}
+        resp = requests.get(url, headers=headers, timeout=self.settings.llm_timeout_s)
+        resp.raise_for_status()
+        data = resp.json()
+        return isinstance(data, dict) and "data" in data
 
     def reply(
         self,
@@ -155,7 +180,7 @@ class Brain:
             llm_model, llm_temperature, llm_mode = self.route(user_text)
         self.last_mode = str(llm_mode or "fast")
 
-        messages: List[Dict[str, str]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        messages: List[Dict[str, str]] = [{"role": "system", "content": self.get_system_prompt()}]
         if extra_system_prompt:
             messages.append({"role": "system", "content": str(extra_system_prompt).strip()})
 
@@ -266,7 +291,7 @@ class Brain:
                 except Exception:
                     pass
 
-    def _retrieve_relevant_memories(self, *, user_id: str, query: str, k: int) -> Optional[dict]:
+    def _retrieve_relevant_memories(self, *, user_id: str, query: str, k: int) -> Optional[Dict[str, Any]]:
         """
         Recuperación ligera por solapamiento de palabras + saliencia.
         Evita dependencias de embeddings/vector DB.
@@ -298,7 +323,7 @@ class Brain:
         if not top:
             return None
 
-        return {"ids": [t[1] for t in top], "contents": [t[2] for t in top]}
+        return {"ids": [t[1] for t in top], "contents": [t[2] for t in top]}  # type: ignore[return-value]
 
     def _tokenize(self, text: str) -> set[str]:
         text = (text or "").lower()
@@ -420,7 +445,7 @@ class Brain:
         ]
 
         # Handle a common pattern: a leading stage direction with a single '*' (unbalanced).
-        def _strip_leading_star_action(m: re.Match) -> str:
+        def _strip_leading_star_action(m: re.Match[str]) -> str:
             inner = (m.group(1) or "").strip().lower()
             if any(w in inner for w in stage_words):
                 return ""
@@ -428,7 +453,7 @@ class Brain:
 
         out = re.sub(r"^\s*\*\s*([^\n]{1,80}?)(?:\s*[,.;:!?]+(?:\s+|$))", _strip_leading_star_action, out)
 
-        def _strip_action(m: re.Match) -> str:
+        def _strip_action(m: re.Match[str]) -> str:
             inner = (m.group(1) or "").strip().lower()
             if any(w in inner for w in stage_words):
                 return " "
@@ -534,21 +559,23 @@ class Brain:
         data = self._safe_json(raw)
         if not data:
             return
-        memories = data.get("memories")
-        if not isinstance(memories, list):
+        memories_raw = data.get("memories")
+        if not isinstance(memories_raw, list):
             return
+        memories: List[Any] = list(memories_raw)  # type: ignore[arg-type]
 
         for m in memories[:3]:
             if not isinstance(m, dict):
                 continue
-            content = str(m.get("content", "")).strip()
+            m_typed: Dict[str, Any] = dict(m)  # type: ignore[arg-type]
+            content = str(m_typed.get("content", "")).strip()
             if not content:
                 continue
-            sal = m.get("salience", 0.6)
-            tags = str(m.get("tags", "")).strip()
+            sal: Any = m_typed.get("salience", 0.6)
+            tags = str(m_typed.get("tags", "")).strip()
             self.memory.add_memory(user_id=user_id, content=content, salience=float(sal), tags=tags)
 
-    def _safe_json(self, raw: str) -> Optional[dict]:
+    def _safe_json(self, raw: str) -> Optional[Dict[str, Any]]:
         raw = (raw or "").strip()
         if not raw:
             return None
@@ -559,7 +586,7 @@ class Brain:
             obj = json.loads(raw)
         except Exception:
             return None
-        return obj if isinstance(obj, dict) else None
+        return obj if isinstance(obj, dict) else None  # type: ignore[return-value]
 
     def _maybe_extract_fact(self, user_text: str) -> None:
         """
@@ -665,7 +692,7 @@ class Brain:
         except Exception:
             return self._chat_requests(messages, model=model, temperature=temperature)
 
-    def _chat_openai_sdk(self, OpenAI, messages: List[Dict[str, str]], *, model: str, temperature: float) -> str:
+    def _chat_openai_sdk(self, OpenAI: Any, messages: List[Dict[str, str]], *, model: str, temperature: float) -> str:
         base = self.settings.llm_base_url.rstrip("/")
 
         # DeepSeek docs often use base_url="https://api.deepseek.com".
@@ -679,7 +706,8 @@ class Brain:
         }
         max_tokens = int(getattr(self.settings, "llm_max_tokens", 0) or 0)
         if max_tokens > 0:
-            kwargs["max_tokens"] = max_tokens
+            token_key = "max_completion_tokens" if self._is_mimo() else "max_tokens"
+            kwargs[token_key] = max_tokens
 
         try:
             resp = client.chat.completions.create(**kwargs)
@@ -693,7 +721,10 @@ class Brain:
             else:
                 raise e
 
-        return resp.choices[0].message.content or ""
+        return resp.choices[0].message.content or ""  # type: ignore[union-attr]
+
+    def _is_mimo(self) -> bool:
+        return "xiaomimimo.com" in self.settings.llm_base_url
 
     def _chat_requests(self, messages: List[Dict[str, str]], *, model: str, temperature: float) -> str:
         base = self.settings.llm_base_url.rstrip("/")
@@ -701,20 +732,49 @@ class Brain:
             base = f"{base}/v1"
         url = f"{base}/chat/completions"
 
+        mimo = self._is_mimo()
+
+        # MIMO preserva reasoning_content entre turnos para mejor rendimiento
+        if mimo:
+            msgs_out: List[Dict[str, Any]] = []
+            for m in messages:
+                entry: Dict[str, Any] = {"role": m["role"], "content": m.get("content", "")}
+                if "reasoning_content" in m:
+                    entry["reasoning_content"] = m["reasoning_content"]
+                msgs_out.append(entry)
+        else:
+            msgs_out = list(messages)  # type: ignore[assignment]
+
         payload: Dict[str, Any] = {
             "model": model,
-            "messages": messages,
+            "messages": msgs_out,
             "temperature": float(temperature),
+            "stream": False,
         }
         max_tokens = int(getattr(self.settings, "llm_max_tokens", 0) or 0)
         if max_tokens > 0:
-            payload["max_tokens"] = max_tokens
-        headers = {"Authorization": f"Bearer {self.settings.llm_api_key}", "Content-Type": "application/json"}
+            # MIMO usa max_completion_tokens en lugar de max_tokens
+            token_key = "max_completion_tokens" if mimo else "max_tokens"
+            payload[token_key] = max_tokens
+
+        if mimo:
+            headers = {"api-key": self.settings.llm_api_key, "Content-Type": "application/json"}
+        else:
+            headers = {"Authorization": f"Bearer {self.settings.llm_api_key}", "Content-Type": "application/json"}
 
         resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=self.settings.llm_timeout_s)
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+
+        # Extraer reasoning_content de la respuesta para preservarlo en turnos futuros
+        choice = data["choices"][0]
+        msg = choice["message"]
+        reasoning = msg.get("reasoning_content")
+        if reasoning and hasattr(self, "memory"):
+            # Guardamos como atributo temporal para que el siguiente turno lo incluya si aplica
+            self._last_reasoning_content = reasoning
+
+        return msg.get("content") or ""
 
     def _fallback_reply(self, user_text: str, *, visual: VisualContext) -> str:
         name = visual.user_name

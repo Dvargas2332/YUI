@@ -138,7 +138,9 @@ class ConfirmGate:
             return None
 
         voice_only = _env_bool("YUI_CONFIRM_VOICE_ONLY", True)
-        if voice_only and source != "voice" and not self._text_arm_active():
+        ui_allowed = _env_bool("YUI_CONFIRM_UI_ALLOWED", False)
+        source_allowed = source == "voice" or (source == "ui" and ui_allowed)
+        if voice_only and not source_allowed and not self._text_arm_active():
             return (
                 "Para confirmar, dilo por voz. Si el reconocimiento de números falla: "
                 "di 'confirmar por texto' y luego escribe el código."
