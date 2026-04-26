@@ -17,13 +17,15 @@ class UiHttpServer:
         host: str,
         port: int,
         static_root: Path,
-        on_command: Callable[[str], bool],
+        on_command: Callable[..., bool],
         get_state: Callable[[], dict[str, Any]],
         on_toggle: Callable[[str, bool], dict[str, Any]],
         on_config: Optional[Callable[[dict[str, str]], dict[str, Any]]] = None,
         on_clear: Optional[Callable[[], dict[str, Any]]] = None,
         on_compact: Optional[Callable[[], dict[str, Any]]] = None,
         on_set_mode: Optional[Callable[[str], dict[str, Any]]] = None,
+        on_plugin_action: Optional[Callable[[str, dict], dict[str, Any]]] = None,
+        on_shutdown: Optional[Callable[[], None]] = None,
     ):
         self.host = host
         self.port = int(port)
@@ -35,6 +37,8 @@ class UiHttpServer:
         self.on_clear = on_clear
         self.on_compact = on_compact
         self.on_set_mode = on_set_mode
+        self.on_plugin_action = on_plugin_action
+        self.on_shutdown = on_shutdown
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -62,6 +66,8 @@ class UiHttpServer:
         on_clear = self.on_clear
         on_compact = self.on_compact
         on_set_mode = self.on_set_mode
+        on_plugin_action = self.on_plugin_action
+        on_shutdown = self.on_shutdown
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
@@ -76,11 +82,15 @@ class UiHttpServer:
                     state = get_state()
                     self._send_json(state.get("catalog", {}))
                     return
+                if parsed.path == "/api/plugins":
+                    state = get_state()
+                    self._send_json({"ok": True, "plugins": state.get("plugins", [])})
+                    return
                 self._serve_static(parsed.path)
 
             def do_POST(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
-                allowed = {"/api/command", "/api/toggle", "/api/config", "/api/clear", "/api/compact", "/api/mode"}
+                allowed = {"/api/command", "/api/toggle", "/api/config", "/api/clear", "/api/compact", "/api/mode", "/api/plugins", "/api/shutdown"}
                 if parsed.path not in allowed:
                     self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
                     return
@@ -94,10 +104,11 @@ class UiHttpServer:
 
                 if parsed.path == "/api/command":
                     text = str(payload.get("text") or "").strip()
+                    workspace_root = str(payload.get("workspace_root") or "").strip()
                     if not text:
                         self._send_json({"error": "text_required"}, status=HTTPStatus.BAD_REQUEST)
                         return
-                    accepted = on_command(text)
+                    accepted = on_command(text, workspace_root)
                     self._send_json({"ok": bool(accepted), "queued": bool(accepted)})
                     return
 
@@ -119,7 +130,7 @@ class UiHttpServer:
                         return
                     # Only allow known YUI_ env keys to avoid arbitrary writes
                     allowed_keys = {
-                        "YUI_LLM_BASE_URL", "YUI_API_KEY", "YUI_LLM_MODEL",
+                        "YUI_LLM_BASE_URL", "YUI_API_KEY", "YUI_LLM_API_KEY", "YUI_LLM_MODEL",
                         "YUI_LLM_MODEL_FAST", "YUI_LLM_MODEL_DEEP",
                         "YUI_LLM_MODE", "YUI_LLM_TEMPERATURE", "YUI_LLM_DEEP_TEMPERATURE",
                         "YUI_LLM_MAX_TOKENS", "YUI_STT_LANGUAGE", "YUI_TTS_ENGINE",
@@ -154,6 +165,20 @@ class UiHttpServer:
                         return
                     mode = str(payload.get("mode") or "auto").strip()
                     self._send_json(on_set_mode(mode))
+                    return
+
+                if parsed.path == "/api/plugins":
+                    if on_plugin_action is None:
+                        self._send_json({"error": "not_supported"}, status=HTTPStatus.NOT_IMPLEMENTED)
+                        return
+                    action = str(payload.get("action") or "").strip()
+                    self._send_json(on_plugin_action(action, payload))
+                    return
+
+                if parsed.path == "/api/shutdown":
+                    self._send_json({"ok": True, "msg": "apagando"})
+                    if on_shutdown is not None:
+                        threading.Thread(target=on_shutdown, daemon=True, name="yui-shutdown-req").start()
                     return
 
             def _serve_static(self, raw_path: str) -> None:

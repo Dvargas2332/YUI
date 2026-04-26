@@ -44,7 +44,7 @@ from ui.http_server import UiHttpServer
 from yui_io.text_input import TextInput
 from desktop.tasks import DesktopTask
 from desktop.task_recorder import TaskRecorder
-from utils.crash_log import install_crash_logging
+from utils.crash_log import install_crash_logging, mark_exit
 from utils.env_store import set_env_value
 from utils.single_instance import acquire_single_instance_lock
 from utils.system_profile import derive_tuning, load_or_collect_profile, refresh_profile, summarize_profile
@@ -115,10 +115,12 @@ class YUI:
         self._ui_ws = None
         self._ui_http = None
         self._text_in = TextInput()
-        self._ui_q: "queue.Queue[str]" = queue.Queue()
+        self._ui_q: "queue.Queue[tuple]" = queue.Queue()
+        self._workspace_root: str = ""  # set by VS Code extension on each command
         self._voice_q: "queue.Queue[str]" = queue.Queue()
         self._voice_thread: Optional[threading.Thread] = None
         self._pending_tool_confirm = None  # Callable[[str], bool] | None
+        self._abort_reply = threading.Event()  # set to cancel in-progress reply
         self._task_learning: Optional[Dict[str, Any]] = None
         self._task_running: Optional[Dict[str, Any]] = None
         self._task_recorder = TaskRecorder()
@@ -306,11 +308,11 @@ class YUI:
 
         self.voice.speak(spoken, mood=mood)
 
-    def _enqueue_ui_command(self, text: str) -> bool:
+    def _enqueue_ui_command(self, text: str, workspace_root: str = "") -> bool:
         cmd = (text or "").strip()
         if not cmd:
             return False
-        self._ui_q.put(cmd)
+        self._ui_q.put((cmd, (workspace_root or "").strip()))
         return True
 
     def _clear_conversation(self) -> Dict[str, Any]:
@@ -412,7 +414,13 @@ class YUI:
 
     def _get_ui_text(self) -> Optional[str]:
         try:
-            return self._ui_q.get_nowait()
+            item = self._ui_q.get_nowait()
+            if isinstance(item, tuple):
+                text, ws_root = item
+                if ws_root:
+                    self._workspace_root = ws_root
+                return text
+            return str(item)
         except queue.Empty:
             return None
 
@@ -464,7 +472,11 @@ class YUI:
             "llm_model_deep": self.settings.llm_model_deep,
             "llm_temperature": float(self.settings.llm_temperature),
             "llm_deep_temperature": float(self.settings.llm_deep_temperature),
+            "llm_max_tokens": int(self.settings.llm_max_tokens),
             "llm_base_url": self.settings.llm_base_url,
+            "stt_language": self.settings.stt_language,
+            "tts_engine": self.settings.tts_engine,
+            "wake_word": self.settings.wake_word,
         }
 
         permissions = {
@@ -477,11 +489,14 @@ class YUI:
             "confirm_text_arm_enabled": os.getenv("YUI_CONFIRM_TEXT_ARM_ENABLED", "1") in {"1", "true", "True"},
             "confirm_pointer": os.getenv("YUI_DESKTOP_CONFIRM_POINTER", "1") in {"1", "true", "True"},
             "require_face_auth": bool(self.settings.require_face_auth),
+            "macros_enabled": bool(getattr(self.brain.macros, "enabled", True)),
+            "style_enabled": bool(self.brain.style.enabled),
+            "teaching_mode": bool(getattr(self.brain.teaching, "enabled", False)),
         }
 
         ws_port = self._ui_ws.actual_port if self._ui_ws is not None else int(os.getenv("YUI_UI_WS_PORT", "8765"))
         return {
-            "agent_state": "ready",
+            "agent_state": "listo",
             "session_id": self.memory.session_id,
             "ws_port": ws_port,
             "mode": {
@@ -499,7 +514,70 @@ class YUI:
             "permissions": permissions,
             "catalog": self.catalog.summary(),
             "system_prompt": self.brain.get_system_prompt(),
+            "plugins": self._list_plugins(),
         }
+
+    def _list_plugins(self) -> List[Dict[str, Any]]:
+        plugins_dir = PROJECT_ROOT / "plugins"
+        result: List[Dict[str, Any]] = []
+        if not plugins_dir.exists():
+            return result
+        for entry in sorted(plugins_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            manifest_path = entry / "plugin.json"
+            if not manifest_path.exists():
+                continue
+            try:
+                import json as _json
+                meta = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                result.append({
+                    "id": meta.get("id", entry.name),
+                    "name": meta.get("name", entry.name),
+                    "version": meta.get("version", "?"),
+                    "description": meta.get("description", ""),
+                    "enabled": bool(meta.get("enabled", True)),
+                    "folder": entry.name,
+                })
+            except Exception:
+                pass
+        return result
+
+    def _plugin_action(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        import json as _json
+        plugins_dir = PROJECT_ROOT / "plugins"
+        folder = str(payload.get("folder") or "").strip()
+        if action == "list":
+            return {"ok": True, "plugins": self._list_plugins()}
+        if action in ("enable", "disable") and folder:
+            manifest_path = plugins_dir / folder / "plugin.json"
+            if not manifest_path.exists():
+                return {"ok": False, "error": "plugin_not_found"}
+            try:
+                meta = _json.loads(manifest_path.read_text(encoding="utf-8"))
+                meta["enabled"] = action == "enable"
+                manifest_path.write_text(_json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                return {"ok": True, "plugins": self._list_plugins()}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+        if action == "install":
+            name = str(payload.get("name") or "").strip()
+            description = str(payload.get("description") or "").strip()
+            if not name:
+                return {"ok": False, "error": "name_required"}
+            folder_name = name.lower().replace(" ", "-")
+            new_dir = plugins_dir / folder_name
+            if new_dir.exists():
+                return {"ok": False, "error": "already_exists"}
+            try:
+                new_dir.mkdir(parents=True)
+                meta = {"id": folder_name, "name": name, "version": "0.1.0", "description": description, "entrypoint": "plugin.py", "enabled": True}
+                (new_dir / "plugin.json").write_text(_json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                (new_dir / "plugin.py").write_text('def register():\n    return {"commands": [], "description": ""}\n', encoding="utf-8")
+                return {"ok": True, "plugins": self._list_plugins()}
+            except Exception as e:
+                return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "unknown_action"}
 
     def _init_runtime_profile(self) -> None:
         if os.getenv("YUI_ENV_PROFILE", "1") in {"0", "false", "False"}:
@@ -574,6 +652,8 @@ class YUI:
                     on_clear=self._clear_conversation,
                     on_compact=self._compact_conversation,
                     on_set_mode=self._set_llm_mode,
+                    on_plugin_action=self._plugin_action,
+                    on_shutdown=self.shutdown,
                 )
                 self._ui_http.start()
                 self.ui_bus.publish(
@@ -730,6 +810,7 @@ class YUI:
                 _reply_result: list = []
                 _reply_done = threading.Event()
 
+                _ws_root = self._workspace_root or ""
                 def _run_reply():
                     try:
                         r = self.brain.reply(
@@ -739,6 +820,7 @@ class YUI:
                             llm_model=model,
                             llm_temperature=temp,
                             llm_mode=mode,
+                            workspace_root=_ws_root,
                         )
                         _reply_result.append(r)
                     except Exception as _e:
@@ -747,21 +829,29 @@ class YUI:
                     finally:
                         _reply_done.set()
 
+                self._abort_reply.clear()
+                self.ui_bus.publish("busy", {"state": "start"})
                 _reply_thread = threading.Thread(target=_run_reply, daemon=True, name="yui-brain")
                 _reply_thread.start()
 
-                # While brain works, keep processing confirmations from the main loop.
+                # While brain works, keep processing confirmations and abort requests.
                 while not _reply_done.is_set():
                     self._preview_tick()
-                    # Check for tool confirmation input.
-                    if self._pending_tool_confirm is not None:
-                        _confirm_text = self._text_in.get() or self._get_ui_text() or self._get_voice_text()
-                        if _confirm_text:
+                    # Check for abort or tool confirmation input.
+                    _incoming = self._text_in.get() or self._get_ui_text() or self._get_voice_text()
+                    if _incoming:
+                        if _incoming.strip() == "__abort__":
+                            self._abort_reply.set()
+                            self.brain.abort()
+                            self.ui_bus.publish("confirm", {"state": "cleared"})
+                        elif self._pending_tool_confirm is not None:
                             try:
-                                self._pending_tool_confirm(_confirm_text)
+                                self._pending_tool_confirm(_incoming)
                             except Exception:
                                 pass
                     _reply_done.wait(timeout=0.05)
+
+                self.ui_bus.publish("busy", {"state": "end"})
 
                 t1 = time.time()
                 print(f"\r[YUI] Listo ({t1 - t0:.1f}s)          ")
@@ -789,48 +879,56 @@ class YUI:
     def shutdown(self) -> None:
         if self._stop.is_set() is False:
             self._stop.set()
+        # Write exit to log immediately — before joins that may hang or a hard kill.
+        mark_exit()
+        # Ignore Ctrl+C during shutdown so thread joins don't get interrupted.
+        try:
+            import signal as _signal
+            _signal.signal(_signal.SIGINT, _signal.SIG_IGN)
+        except BaseException:
+            pass
         try:
             self._text_in.stop()
-        except Exception:
+        except BaseException:
             pass
         try:
             if self._voice_thread is not None and self._voice_thread.is_alive():
                 self._voice_thread.join(timeout=2.0)
-        except Exception:
+        except BaseException:
             pass
         try:
             if self._ui_ws is not None:
                 self._ui_ws.stop()
-        except Exception:
+        except BaseException:
             pass
         try:
             if self._ui_http is not None:
                 self._ui_http.stop()
-        except Exception:
+        except BaseException:
             pass
         try:
             self._sec_watch.stop()
-        except Exception:
+        except BaseException:
             pass
         try:
             if self._vision_thread is not None and self._vision_thread.is_alive():
                 self._vision_thread.join(timeout=2.0)
-        except Exception:
+        except BaseException:
             pass
         try:
             if self._voice_enabled:
                 self._mic_meter.stop()
-        except Exception:
+        except BaseException:
             pass
         try:
             if self.camera is not None:
                 self.camera.release()
-        except Exception:
+        except BaseException:
             pass
         if cv2 is not None:
             try:
                 cv2.destroyAllWindows()
-            except Exception:
+            except BaseException:
                 pass
 
     def _start_voice_thread(self) -> None:

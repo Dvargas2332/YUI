@@ -99,3 +99,15 @@ def install_crash_logging() -> None:
         except Exception:
             pass
 
+
+def mark_exit() -> None:
+    """Write the exit line immediately (call before long joins that may hang)."""
+    fh = _LOG_FH
+    if fh is None:
+        return
+    try:
+        fh.write(f"[YUI] exit {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        fh.flush()
+    except Exception:
+        pass
+
