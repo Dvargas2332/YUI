@@ -13,6 +13,7 @@ __pycache__/
 .history/
 .vscode/
 .venv/
+.claude/
 venv_yui/
 known_faces/
 models/

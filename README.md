@@ -20,19 +20,20 @@ Cuando procesas una petición, YUI no delega en otro agente — evalúa si neces
 
 Cada capacidad es un módulo del cerebro de YUI que el agente activa según el contexto de la conversación:
 
-| Módulo | Descripción |
-|---|---|
-| **Razonamiento LLM** | Compatible con cualquier endpoint `/v1/chat/completions` (MiMo, DeepSeek, OpenAI, Ollama…) |
-| **Voz (STT)** | Reconocimiento de voz con `speech_recognition` / `sounddevice` + wake word configurable |
-| **Voz (TTS)** | Síntesis con `edge-tts` (voz natural es-MX-DaliaNeural por defecto) |
-| **Visión** | Cámara + MediaPipe: detección de rostro, manos y gestos en tiempo real |
-| **Autenticación facial** | Reconocimiento de personas por nombre desde `known_faces/` |
-| **Memoria** | SQLite — corto y largo plazo, resúmenes automáticos, recuperación semántica |
-| **Automatización** | Control del escritorio con confirmación de seguridad (código 6 dígitos + UI) |
-| **Seguridad** | Guard de URLs/archivos, monitoreo defensivo, auditorías del sistema |
-| **Interfaz web** | Panel en `http://127.0.0.1:8080` + WebSocket en puerto `8765` |
-| **Extensión VSCode** | Sidebar integrado en el editor con chat, config y soporte MIMO |
-| **Plugins / Extensions** | Catálogo modular extensible con carpetas `plugins/` y `extensions/` |
+| Módulo | Paquete | Descripción |
+|---|---|---|
+| **Razonamiento LLM** | `ai/` | Compatible con cualquier endpoint `/v1/chat/completions` (MiMo, DeepSeek, OpenAI, Ollama…) |
+| **Cerebro híbrido** | `ai/` | Estilos de respuesta, macros, razonamiento contextual |
+| **Voz (STT)** | `yui_io/` | Reconocimiento de voz con `speech_recognition` / `sounddevice` + wake word configurable |
+| **Voz (TTS)** | `yui_io/` | Síntesis con `edge-tts` (voz natural es-MX-DaliaNeural por defecto) |
+| **Visión** | `perception/` | Cámara + MediaPipe: detección de rostro, manos y gestos en tiempo real |
+| **Autenticación facial** | `perception/` | Reconocimiento de personas por nombre desde `known_faces/` |
+| **Memoria** | `memory/` | SQLite — corto y largo plazo, resúmenes automáticos, recuperación semántica |
+| **Automatización** | `desktop/` | Control del escritorio con confirmación de seguridad (código 6 dígitos + UI) |
+| **Seguridad** | `security/` | Guard de URLs/archivos, monitoreo defensivo, auditorías del sistema |
+| **Interfaz web** | `ui/` | Panel en `http://127.0.0.1:8080` + WebSocket en puerto `8765` |
+| **Extensión VSCode** | `vscode-extension/` | Sidebar integrado en el editor con chat, config y soporte MIMO |
+| **Plugins / Extensions** | `plugins/` `extensions/` | Catálogo modular extensible con manifiestos `plugin.json` / `extension.json` |
 
 ---
 
@@ -100,7 +101,7 @@ YUI incluye una extensión para Visual Studio Code que integra el asistente dire
 cd vscode-extension
 npm install
 npm run package
-code --install-extension yui-assistant-1.1.1.vsix
+code --install-extension yui-assistant-1.2.6.vsix
 ```
 
 **Funciones:**
@@ -197,32 +198,62 @@ YUI está optimizado para usar la API de **Xiaomi MiMo**, un modelo de razonamie
 
 ```
 YUI/
-├── main.py                  # Punto de entrada principal
+├── main.py                      # Punto de entrada principal
+├── integrations.py              # Catálogo de plugins y extensiones
 ├── config/
-│   └── settings.py          # Carga y validación de configuración
-├── core/
-│   ├── brain.py             # Cliente LLM principal
-│   ├── hybrid_brain.py      # Cerebro híbrido (estilos, macros, memoria)
-│   ├── voice_processing.py  # STT + TTS + wake word
-│   ├── vision_engine.py     # Cámara + MediaPipe
-│   ├── face_authentication.py
-│   ├── memory.py            # Memoria corto/largo plazo (SQLite)
-│   └── integrations.py      # Catálogo de plugins y extensiones
+│   └── settings.py              # Carga y validación de configuración
+├── ai/
+│   ├── brain.py                 # Cliente LLM principal
+│   ├── hybrid_brain.py          # Cerebro híbrido (estilos, macros, memoria)
+│   ├── logic.py                 # Razonamiento y toma de decisiones
+│   └── tools.py                 # Herramientas del agente
+├── yui_io/
+│   ├── stt.py                   # Reconocimiento de voz (Speech-to-Text)
+│   ├── tts.py                   # Síntesis de voz (Text-to-Speech)
+│   ├── wake.py                  # Detección de wake word
+│   ├── mic_meter.py             # Medidor de nivel de micrófono
+│   └── text_input.py            # Entrada de texto por consola
+├── perception/
+│   ├── vision_engine.py         # Cámara + MediaPipe
+│   ├── face_authentication.py   # Autenticación facial por nombre
+│   └── perception_classifier.py # Clasificación de escena/contexto visual
+├── memory/
+│   └── store.py                 # Memoria corto/largo plazo (SQLite)
 ├── desktop/
-│   ├── controller.py        # Automatización de escritorio
-│   ├── security_watch.py    # Monitoreo defensivo
-│   ├── screen_context.py    # Contexto de ventana activa
-│   └── tasks.py             # Tareas grabadas/reproducibles
+│   ├── controller.py            # Automatización de escritorio
+│   ├── confirm.py               # Confirmación de acciones sensibles
+│   ├── screen_context.py        # Contexto de ventana activa
+│   ├── tasks.py                 # Tareas grabadas/reproducibles
+│   ├── task_recorder.py         # Grabador de tareas
+│   ├── privacy_devices.py       # Control de privacidad de dispositivos
+│   ├── security_audit.py        # Auditorías del sistema
+│   ├── security_guard.py        # Guardia de seguridad de escritorio
+│   └── security_watch.py        # Monitoreo defensivo en tiempo real
+├── security/
+│   ├── guard.py                 # Guard de URLs y archivos
+│   └── watch.py                 # Vigilancia del sistema
 ├── ui/
-│   ├── http_server.py       # API REST (puerto 8080)
-│   ├── ws_server.py         # Servidor WebSocket (puerto 8765)
-│   └── web/                 # Frontend web del panel
-├── vscode-extension/        # Extensión para VSCode
-├── plugins/                 # Plugins locales (plugin.json)
-├── extensions/              # Extensiones locales (extension.json)
-├── data/                    # Archivos de datos en tiempo de ejecución
-├── known_faces/             # Imágenes para autenticación facial
-└── .env                     # Configuración privada (NO subir a git)
+│   ├── http_server.py           # API REST (puerto 8080)
+│   ├── ws_server.py             # Servidor WebSocket (puerto 8765)
+│   ├── ws_events.py             # Manejadores de eventos WebSocket
+│   └── web/                     # Frontend web del panel
+├── utils/
+│   ├── camera_manager.py        # Gestión de cámara
+│   ├── crash_log.py             # Registro de errores críticos
+│   ├── env_store.py             # Lectura/escritura de variables de entorno
+│   ├── logger.py                # Logger centralizado
+│   ├── single_instance.py       # Control de instancia única
+│   └── system_profile.py        # Perfil del sistema
+├── scripts/
+│   ├── camera_probe.py          # Diagnóstico de cámaras disponibles
+│   └── list_microphones.py      # Lista micrófonos disponibles
+├── plugins/                     # Plugins locales (plugin.json)
+├── extensions/                  # Extensiones locales (extension.json)
+├── models/mediapipe/            # Modelos de MediaPipe (no subir a git)
+├── vscode-extension/            # Extensión para VSCode
+├── known_faces/                 # Imágenes para autenticación facial (no subir a git)
+├── data/                        # Archivos de datos en tiempo de ejecución (no subir a git)
+└── .env                         # Configuración privada (NO subir a git)
 ```
 
 ---
@@ -237,6 +268,7 @@ El servidor HTTP expone una API local en `http://127.0.0.1:8080`:
 | `/api/command` | POST | Enviar un comando de texto a YUI |
 | `/api/toggle` | POST | Activar/desactivar permisos en tiempo real |
 | `/api/config` | POST | Actualizar variables de entorno en caliente |
+| `/api/shutdown` | POST | Detener el servidor YUI de forma segura |
 
 ---
 

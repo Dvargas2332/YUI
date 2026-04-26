@@ -25,19 +25,19 @@ from typing import Any, Callable, Dict, List, Optional
 from dotenv import load_dotenv
 
 from config.settings import PROJECT_ROOT, Settings
-from core.brain import VisualContext
-from core.hybrid_brain import HybridBrain
-from core.integrations import IntegrationCatalog
-from core.face_authentication import FaceAuthenticator
-from core.memory import MemoryStore
-from core.perception_classifier import infer_emotion_from_blendshapes, knn_classify, parse_vectors
-from core.vision_engine import VisionEngine
-from core.voice_processing import VoiceAssistant
+from ai.brain import VisualContext
+from ai.hybrid_brain import HybridBrain
+from integrations import IntegrationCatalog
+from perception.face_authentication import FaceAuthenticator
+from memory.store import MemoryStore
+from perception.perception_classifier import infer_emotion_from_blendshapes, knn_classify, parse_vectors
+from perception.vision_engine import VisionEngine
+from audio.voice_processing import VoiceAssistant
 from utils.camera_manager import CameraManager
 from yui_io.mic_meter import MicMeter
 from desktop.controller import DesktopController
 from desktop.screen_context import active_window_summary, capture_screen_embedding
-from desktop.security_watch import SecurityWatch
+from security.watch import SecurityWatch
 from ui.ws_events import UiEventBus
 from ui.ws_server import UiWsServer, WsConfig
 from ui.http_server import UiHttpServer
@@ -795,7 +795,8 @@ class YUI:
                     self._speak(local, mood=visual.face_emotion)
                     continue
 
-                model, temp, mode = self.brain.route(user_text)
+                route_result = self.brain.route(user_text)
+                model, temp, mode = route_result[0], route_result[1], route_result[2]
                 self.ui_bus.publish("thinking", {"mode": mode, "state": "start"})
                 print(f"[YUI] Pensando... (modo={mode})", end="", flush=True)
                 if input_source == "voice":
@@ -871,6 +872,16 @@ class YUI:
                 t2 = time.time()
                 if os.getenv("YUI_DEBUG_LATENCY", "0") not in {"0", "false", "False"}:
                     print(f"[YUI] Latency: llm={t1 - t0:.2f}s tts={t2 - t1:.2f}s total={t2 - t0:.2f}s mode={mode}")
+
+                # Auto-continue if brain detected pending work (multi-file tasks)
+                continuation = None
+                try:
+                    continuation = self.brain.pop_continuation()
+                except Exception:
+                    pass
+                if continuation:
+                    print(f"[YUI] Auto-continuando tarea...")
+                    self._ui_q.put((continuation, self._workspace_root or ""))
         except KeyboardInterrupt:
             print("\n[YUI] Interrumpido por teclado. Cerrando...")
         finally:
@@ -1373,7 +1384,7 @@ class YUI:
         if low.startswith("analiza seguridad "):
             sample = t[len("analiza seguridad ") :].strip()
             try:
-                from core.security_checks import analyze_text, findings_to_voice
+                from security.guard import analyze_text, findings_to_voice
 
                 findings = analyze_text(sample)
                 msg = findings_to_voice(findings) or "No vi señales claras de ataque en ese texto."

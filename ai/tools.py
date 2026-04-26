@@ -7,6 +7,24 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 
+def build_diff_payload(path: str, old_lines: List[str], new_lines: List[str]) -> str:
+    """Returns a JSON string with unified-style diff chunks for the UI."""
+    import json
+    chunks: List[dict] = []
+    max_len = max(len(old_lines), len(new_lines), 1)
+    i = 0
+    while i < max_len:
+        old_line = old_lines[i] if i < len(old_lines) else None
+        new_line = new_lines[i] if i < len(new_lines) else None
+        if old_line != new_line:
+            chunks.append({"old": old_line, "new": new_line, "ln": i + 1})
+        i += 1
+        if len(chunks) >= 200:
+            break
+
+    return json.dumps({"path": path, "chunks": chunks, "added": max(0, len(new_lines) - len(old_lines)), "removed": max(0, len(old_lines) - len(new_lines))})
+
+
 # Tool definitions in OpenAI function-calling format
 TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     {
@@ -93,13 +111,15 @@ def execute_tool(
     args: Dict[str, Any],
     *,
     confirm_fn: Optional[Callable[[str], bool]] = None,
+    diff_fn: Optional[Callable[[str, List[str], List[str]], None]] = None,
 ) -> str:
     """
     Execute a tool by name with the given arguments.
     confirm_fn receives a description string and returns True if approved.
+    diff_fn receives (path, old_lines, new_lines) before writing.
     """
     if name == "write_file":
-        return _write_file(args, confirm_fn=confirm_fn)
+        return _write_file(args, confirm_fn=confirm_fn, diff_fn=diff_fn)
     if name == "read_file":
         return _read_file(args)
     if name == "create_folder":
@@ -111,7 +131,12 @@ def execute_tool(
     return f"[error] Herramienta desconocida: {name}"
 
 
-def _write_file(args: Dict[str, Any], *, confirm_fn: Optional[Callable[[str], bool]]) -> str:
+def _write_file(
+    args: Dict[str, Any],
+    *,
+    confirm_fn: Optional[Callable[[str], bool]],
+    diff_fn: Optional[Callable[[str, List[str], List[str]], None]] = None,
+) -> str:
     path = str(args.get("path", "")).strip()
     content = str(args.get("content", ""))
     if not path:
@@ -121,9 +146,22 @@ def _write_file(args: Dict[str, Any], *, confirm_fn: Optional[Callable[[str], bo
     action = "sobreescribir" if p.exists() else "crear"
     desc = f"{action} archivo: {p}"
 
+    old_lines: List[str] = []
+    if p.exists():
+        try:
+            old_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        except Exception:
+            pass
+
     if confirm_fn is not None:
         if not confirm_fn(desc):
             return "[cancelado] El usuario rechazó la operación."
+
+    if diff_fn is not None:
+        try:
+            diff_fn(str(p), old_lines, content.splitlines())
+        except Exception:
+            pass
 
     try:
         p.parent.mkdir(parents=True, exist_ok=True)

@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from typing import Callable, List, Optional, Tuple
 
 from config.settings import Settings
-from core.brain import Brain, VisualContext
-from core.memory import MemoryStore
+from ai.brain import Brain, VisualContext
+from ai.task_policy import TaskPolicy
+from memory.store import MemoryStore
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -300,11 +301,49 @@ class HybridBrain:
     def __init__(self, settings: Settings, memory: MemoryStore, confirm_fn=None, step_fn=None):
         self.settings = settings
         self.memory = memory
-        self.llm = Brain(settings, memory, confirm_fn=confirm_fn, step_fn=step_fn)
+        self.task_policy = TaskPolicy()
+        self.llm = Brain(settings, memory, confirm_fn=confirm_fn, step_fn=self._make_step_fn(step_fn))
         self.style = StylePolicy(memory)
         self.macros = MacroPolicy(memory)
         self.teaching = TeachingModePolicy(memory)
         self.last_display_text: Optional[str] = None
+        self._pending_continuation: Optional[str] = None  # set when task has more work to do
+        self._continuation_count: int = 0
+        self._continuation_max: int = 12  # safety cap
+
+    def pop_continuation(self) -> Optional[str]:
+        """Returns and clears any pending autonomous continuation prompt."""
+        c = self._pending_continuation
+        self._pending_continuation = None
+        if c:
+            self._continuation_count += 1
+            if self._continuation_count > self._continuation_max:
+                print(f"[YUI] Auto-continuación: límite de {self._continuation_max} iteraciones alcanzado.")
+                self._continuation_count = 0
+                return None
+        else:
+            self._continuation_count = 0
+        return c
+
+    def _make_step_fn(self, outer_step_fn) -> Optional[Callable]:
+        """Wraps the original step_fn to intercept file_diff events for TaskPolicy."""
+        task_policy = self.task_policy
+
+        def wrapped(event: str, tool_name: str, detail) -> None:
+            if event == "file_diff":
+                warning = task_policy.on_file_written(tool_name)
+                if warning and outer_step_fn:
+                    try:
+                        outer_step_fn("tool_end", tool_name, f"[advertencia] {warning}")
+                    except Exception:
+                        pass
+            if outer_step_fn:
+                try:
+                    outer_step_fn(event, tool_name, detail)
+                except Exception:
+                    pass
+
+        return wrapped if outer_step_fn or True else None
 
     @property
     def last_mode(self) -> str:
@@ -316,7 +355,7 @@ class HybridBrain:
     def set_system_prompt(self, prompt: str) -> None:
         self.llm.set_system_prompt(prompt)
 
-    def route(self, user_text: str) -> Tuple[str, float, str]:
+    def route(self, user_text: str) -> tuple:
         return self.llm.route(user_text)
 
     def health_check(self) -> bool:
@@ -331,9 +370,13 @@ class HybridBrain:
         llm_model: Optional[str] = None,
         llm_temperature: Optional[float] = None,
         llm_mode: Optional[str] = None,
+        workspace_root: str = "",
     ) -> str:
         # Reset last display (used by UI/console).
         self.last_display_text = None
+
+        # TaskPolicy: start tracking
+        self.task_policy.on_task_start(user_text)
 
         # 0) Teaching mode toggles
         teach = self.teaching.maybe_handle(user_text)
@@ -387,6 +430,7 @@ class HybridBrain:
                 llm_mode=llm_mode,
                 extra_system_prompt=extra,
                 postprocess=self.style.postprocess_display if self.style.enabled else None,
+                workspace_root=workspace_root,
             )
             voice = self.style.postprocess(full) if self.style.enabled else full
             if full and voice and full.strip() != voice.strip():
@@ -394,7 +438,7 @@ class HybridBrain:
             return voice.strip() if voice else full
 
         post: Optional[Callable[[str], str]] = self.style.postprocess if self.style.enabled else None
-        return self.llm.reply(
+        result = self.llm.reply(
             user_text,
             visual=visual,
             llm_model=llm_model,
@@ -402,7 +446,47 @@ class HybridBrain:
             llm_mode=llm_mode,
             extra_system_prompt=extra,
             postprocess=post,
+            workspace_root=workspace_root,
         )
+
+        # TaskPolicy: audit after task completes — auto-continue if work remains
+        audit = self.task_policy.on_task_end(project_root=workspace_root)
+        if audit:
+            self._pending_continuation = (
+                f"Continúa el trabajo donde lo dejaste. El audit detectó: {audit}. "
+                "Completa todos los archivos faltantes y repara referencias rotas sin pedir confirmación. "
+                "Sigue trabajando hasta que todo esté completo."
+            )
+        elif result and not self._pending_continuation:
+            # Detect when the LLM itself signals more work remains
+            self._pending_continuation = self._detect_self_continuation(result, workspace_root)
+
+        return result
+
+    # ── Self-continuation detection ───────────────────────────────────────────
+
+    _CONTINUATION_SIGNALS = [
+        "continuaré", "seguiré", "voy a continuar", "ahora crearé",
+        "ahora voy a crear", "a continuación crearé", "procedo a crear",
+        "el siguiente archivo", "los siguientes archivos", "siguen los archivos",
+        "now i'll", "i'll continue", "next i'll",
+    ]
+
+    def _detect_self_continuation(self, response: str, workspace_root: str) -> Optional[str]:
+        """
+        If the LLM response contains signals that it knows more work remains,
+        return a continuation prompt. Only fires for multi-file task contexts.
+        """
+        if not self.task_policy.plan.active:
+            return None
+        low = response.lower()
+        if any(sig in low for sig in self._CONTINUATION_SIGNALS):
+            return (
+                "Continúa con el siguiente archivo. No expliques lo que vas a hacer, "
+                "solo escribe el archivo directamente usando las herramientas. "
+                "Cuando termines todos los archivos, di 'Todos los archivos están completos.'"
+            )
+        return None
 
     def preprocess(self, user_text: str) -> str:
         """

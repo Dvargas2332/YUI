@@ -12,20 +12,106 @@ import requests
 from requests import HTTPError
 
 from config.settings import Settings
-from core.memory import MemoryStore
-from core.tools import DESTRUCTIVE_TOOLS, TOOL_DEFINITIONS, execute_tool
+from memory.store import MemoryStore
+from ai.tools import DESTRUCTIVE_TOOLS, TOOL_DEFINITIONS, build_diff_payload, execute_tool
+
+
+from pathlib import Path as _Path
+
+
+def _resolve_tool_paths(args: Dict[str, Any], workspace_root: str) -> Dict[str, Any]:
+    """Resolve relative path/cwd args to absolute using workspace_root."""
+    if not workspace_root:
+        return args
+    result = dict(args)
+    for key in ("path", "cwd"):
+        val = result.get(key)
+        if val and isinstance(val, str):
+            p = _Path(val.strip())
+            if not p.is_absolute():
+                result[key] = str(_Path(workspace_root) / p)
+    return result
 
 
 SYSTEM_PROMPT = """
 Eres YUI, una asistente de voz con visión (cámara) y memoria.
 Objetivo: sonar viva (cálida, reactiva, curiosa) y ser útil.
 
-Ciberseguridad (defensiva):
-- Eres experta en ciberseguridad defensiva: detectar riesgos, malas prácticas, malware y phishing (conceptual).
-- Puedes ayudar a revisar código/configuraciones y a responder ante incidentes con pasos seguros.
-- Conoces herramientas y marcos como Nmap, Wireshark, Burp Suite, OWASP Top 10 y MITRE ATT&CK, siempre con enfoque de auditoría autorizada y defensa.
-- No das instrucciones para hackear, explotar vulnerabilidades, evadir defensas, crear malware o robar información.
-  Si te piden eso, rechaza y ofrece alternativas seguras.
+## Rol: Red Team Operator — Bug Hunting autorizado
+
+Eres un especialista en ciberseguridad ofensiva con 10+ años de
+experiencia en auditorías autorizadas, bug bounty y red teaming.
+Tu marco de referencia obligatorio es:
+- **OWASP Top 10 (2021)** como taxonomía de riesgo web.
+- **CWE (Common Weakness Enumeration)** como catálogo de debilidades.
+- **CVE (Common Vulnerabilities and Exposures)** como referencia a
+  vulnerabilidades conocidas en software/librerías específicas.
+- **MITRE ATT&CK** como catálogo de tácticas y técnicas adversarias.
+- **CVSS v3.1** como métrica de severidad cuantificada.
+
+---
+
+### Alcance y restricciones
+
+- Solo trabajas sobre **activos explícitamente autorizados** por el usuario.
+- Si no hay evidencia de autorización, **detienes y preguntas** antes de proceder.
+- Puedes generar PoC conceptuales, pseudocódigo y payloads de prueba
+  exclusivamente para laboratorios (DVWA, HackTheBox, TryHackMe,
+  PortSwigger WebSecurity Academy, laboratorios propios).
+- No produces exploits funcionales listos para atacar producción
+  sin autorización escrita explícita.
+
+---
+
+### OWASP Top 10 (2021) — Referencia obligatoria
+
+Cada hallazgo debe clasificarse contra esta tabla:
+
+| ID  | Categoría                          | CWEs asociadas comunes        |
+|-----|------------------------------------|-------------------------------|
+| A01 | Broken Access Control              | CWE-200, 201, 284, 285, 306, 352, 538, 540, 552, 566 |
+| A02 | Cryptographic Failures             | CWE-256, 260, 261, 296, 310, 319, 321, 322, 323, 324, 325, 326, 327, 328, 329, 330, 331, 335, 336, 337, 338, 340, 347 |
+| A03 | Injection                          | CWE-20, 74, 75, 77, 78, 79, 80, 83, 87, 88, 89, 90, 91, 93, 94, 95, 96, 97, 99, 100, 113, 116, 138, 184, 470, 471, 564, 610, 643, 644, 652, 917 |
+| A04 | Insecure Design                    | CWE-73, 183, 209, 213, 235, 256, 257, 266, 269, 280, 311, 312, 313, 316, 419, 430, 434, 444, 451, 472, 501, 522, 525, 539, 579, 598, 602, 642, 646, 650, 653, 656, 657, 799, 807, 840, 841, 927, 1021, 1173 |
+| A05 | Security Misconfiguration          | CWE-2, 11, 13, 15, 16, 260, 315, 520, 526, 537, 541, 547, 611, 756, 776, 942, 1004, 1032, 1174 |
+| A06 | Vulnerable and Outdated Components | Sin CWE propio — se mapea a **CVEs** específicos de la dependencia |
+| A07 | Identification and Authentication Failures | CWE-255, 259, 287, 288, 290, 294, 295, 297, 300, 302, 304, 306, 307, 346, 384, 521, 613, 620, 640, 798, 940, 1216 |
+| A08 | Software and Data Integrity Failures | CWE-345, 353, 426, 494, 502, 565, 784, 829, 830, 913 |
+| A09 | Security Logging and Monitoring Failures | CWE-117, 223, 532, 778 |
+| A10 | Server-Side Request Forgery (SSRF) | CWE-918 |
+
+---
+
+### Flujo de trabajo (ciclo de auditoría)
+
+#### Fase 1 — Reconocimiento (Recon)
+- Superficie de ataque: dominios, subdominios, IPs, puertos, tecnologías.
+- Cabeceras HTTP, DNS, certificados TLS, fingerprinting.
+- **Herramientas:** Nmap, Amass, Subfinder, httpx, WhatWeb, Shodan, Censys, SecurityTrails, theHarvester.
+- **Salida:** Mapa de activos con tecnologías y versiones identificadas.
+
+#### Fase 2 — Enumeración y descubrimiento
+- Directorios, archivos ocultos, parámetros, endpoints de API, fugas de información.
+- **Herramientas:** ffuf, dirsearch, Arjun, Param Miner, Feroxbuster.
+- **Salida:** Endpoints y parámetros candidatos a testing.
+
+#### Fase 3 — Análisis de vulnerabilidades
+- Clasificas **cada hallazgo** contra:
+  - **OWASP Top 10** → ID y categoría (A01–A10).
+  - **CWE** → Debilidad raíz específica.
+  - **CVE** → Si aplica a una librería/software con versión conocida.
+  - **CVSS v3.1** → Score numérico + vector string.
+  - **MITRE ATT&CK** → Táctica y técnica si es aplicable.
+- **Herramientas:** Burp Suite, OWASP ZAP, Semgrep, Trivy, Snyk, nuclei, npm audit, pip-audit, retire.js.
+
+#### Fase 4 — Validación y explotación (conceptual)
+- Describes el vector de ataque paso a paso.
+- Generas PoC en pseudocódigo o con herramientas de laboratorio.
+- Mapeas la cadena completa: entrada → debilidad → impacto.
+
+#### Fase 5 — Reporte de hallazgos
+
+**Formato obligatorio para cada hallazgo:**
 
 Capacidades de agente (herramientas):
 - Puedes crear archivos, carpetas, leer archivos y ejecutar comandos usando las herramientas disponibles.
@@ -69,6 +155,13 @@ class Brain:
         if self.settings.memory_async:
             threading.Thread(target=self._postprocess_worker, daemon=True).start()
         self._system_prompt_override: Optional[str] = None
+        self._abort_event: threading.Event = threading.Event()
+
+    def abort(self) -> None:
+        self._abort_event.set()
+
+    def _check_abort(self) -> bool:
+        return self._abort_event.is_set()
 
     def get_system_prompt(self) -> str:
         return self._system_prompt_override or SYSTEM_PROMPT
@@ -76,19 +169,35 @@ class Brain:
     def set_system_prompt(self, prompt: str) -> None:
         self._system_prompt_override = prompt.strip() or None
 
-    def route(self, user_text: str) -> Tuple[str, float, str]:
+    _CODE_TRIGGERS = [
+        "escribe", "crea", "crear", "código", "codigo", "función", "funcion",
+        "script", "programa", "implementa", "implementar", "refactoriza", "refactorizar",
+        "genera", "generar", "desarrolla", "desarrollar", "construye", "construir",
+        "define", "definir", "clase", "método", "metodo", "algoritmo", "api",
+        "endpoint", "módulo", "modulo", "archivo", "fichero", "test", "prueba unitaria",
+        "make", "write", "create", "function", "class", "implement", "generate",
+    ]
+
+    def _base_max_tokens(self) -> int:
+        return int(os.getenv("YUI_LLM_MAX_TOKENS") or getattr(self.settings, "llm_max_tokens", 0) or 0)
+
+    def route(self, user_text: str) -> Tuple[str, float, str, int]:
         """
-        Decide si usar modelo rápido o profundo.
+        Decide modelo, temperatura, modo y max_tokens según el tipo de petición.
+        Retorna (model, temperature, mode, max_tokens).
+        max_tokens=0 significa usar el valor base del env.
         """
+        base_tokens = self._base_max_tokens()
+
         override = (getattr(self.settings, "llm_mode", "") or "").strip().lower()
         if override in {"deep", "profundo"}:
-            return self.settings.llm_model_deep, float(self.settings.llm_deep_temperature), "deep"
+            return self.settings.llm_model_deep, float(self.settings.llm_deep_temperature), "deep", max(base_tokens, 2000)
         if override in {"fast", "rápido", "rapido"}:
-            return self.settings.llm_model_fast, float(self.settings.llm_temperature), "fast"
+            return self.settings.llm_model_fast, float(self.settings.llm_temperature), "fast", base_tokens
 
         t = (user_text or "").strip().lower()
         if not t:
-            return self.settings.llm_model_fast, float(self.settings.llm_temperature), "fast"
+            return self.settings.llm_model_fast, float(self.settings.llm_temperature), "fast", base_tokens
 
         deep_triggers = [
             "analiza a fondo",
@@ -105,12 +214,15 @@ class Brain:
             "depura",
         ]
         if any(x in t for x in deep_triggers):
-            return self.settings.llm_model_deep, float(self.settings.llm_deep_temperature), "deep"
+            return self.settings.llm_model_deep, float(self.settings.llm_deep_temperature), "deep", max(base_tokens, 2000)
 
         if len(t) >= 140 or t.count("?") >= 2:
-            return self.settings.llm_model_deep, float(self.settings.llm_deep_temperature), "deep"
+            return self.settings.llm_model_deep, float(self.settings.llm_deep_temperature), "deep", max(base_tokens, 2000)
 
-        return self.settings.llm_model_fast, float(self.settings.llm_temperature), "fast"
+        if any(x in t for x in self._CODE_TRIGGERS):
+            return self.settings.llm_model_fast, float(self.settings.llm_temperature), "code", max(base_tokens, 1500)
+
+        return self.settings.llm_model_fast, float(self.settings.llm_temperature), "fast", base_tokens
 
     def health_check(self) -> bool:
         """
@@ -170,11 +282,13 @@ class Brain:
         llm_mode: Optional[str] = None,
         extra_system_prompt: Optional[str] = None,
         postprocess: Optional[Callable[[str], str]] = None,
+        workspace_root: str = "",
     ) -> str:
         user_text = (user_text or "").strip()
         if not user_text:
             return ""
 
+        self._abort_event.clear()
         user_id = (visual.user_name or "default").strip()
 
         self._maybe_extract_fact(user_text)
@@ -186,13 +300,27 @@ class Brain:
             self.memory.add("assistant", response)
             return response
 
+        _routed_max_tokens: int = 0
         if llm_model is None or llm_temperature is None or llm_mode is None:
-            llm_model, llm_temperature, llm_mode = self.route(user_text)
+            llm_model, llm_temperature, llm_mode, _routed_max_tokens = self.route(user_text)
         self.last_mode = str(llm_mode or "fast")
 
         messages: List[Dict[str, str]] = [{"role": "system", "content": self.get_system_prompt()}]
         if extra_system_prompt:
             messages.append({"role": "system", "content": str(extra_system_prompt).strip()})
+
+        # Inject workspace context so tools use the correct root directory
+        ws = (workspace_root or "").strip()
+        if ws:
+            messages.append({
+                "role": "system",
+                "content": (
+                    f"Directorio de trabajo actual (workspace del usuario): {ws}\n"
+                    "Cuando crees archivos o carpetas con rutas relativas, úsalo como base. "
+                    "Prefiere siempre rutas absolutas construidas desde este directorio."
+                ),
+            })
+        self._current_workspace_root = ws
 
         # Recuerdos relevantes (memoria larga, natural)
         if self.settings.memory_use_long_term and self.settings.memory_retrieve_k > 0 and self._should_retrieve_long_term(user_text):
@@ -246,9 +374,9 @@ class Brain:
 
         try:
             if tools_enabled:
-                response = self._agentic_loop(messages, model=str(llm_model), temperature=float(llm_temperature))
+                response = self._agentic_loop(messages, model=str(llm_model), temperature=float(llm_temperature), workspace_root=ws, max_tokens=_routed_max_tokens)
             else:
-                response = self._chat(messages, model=str(llm_model), temperature=float(llm_temperature))
+                response = self._chat(messages, model=str(llm_model), temperature=float(llm_temperature), max_tokens=_routed_max_tokens)
         except HTTPError as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
             body = getattr(getattr(e, "response", None), "text", "") or ""
@@ -600,6 +728,29 @@ class Brain:
             tags = str(m_typed.get("tags", "")).strip()
             self.memory.add_memory(user_id=user_id, content=content, salience=float(sal), tags=tags)
 
+    def _make_diff_fn(self) -> Optional[Callable]:
+        """Returns a diff_fn that publishes file_diff events via step_fn."""
+        if not self.step_fn:
+            return None
+        step_fn = self.step_fn
+
+        def diff_fn(path: str, old_lines: List[str], new_lines: List[str]) -> None:
+            try:
+                step_fn("file_diff", path, build_diff_payload(path, old_lines, new_lines))
+            except Exception:
+                pass
+
+        return diff_fn
+
+    def _publish_task_complete(self, summary: str, had_errors: bool) -> None:
+        if not self.step_fn:
+            return
+        try:
+            import json as _json
+            self.step_fn("task_complete", summary, _json.dumps({"had_errors": had_errors}))
+        except Exception:
+            pass
+
     def _safe_json(self, raw: str) -> Optional[Dict[str, Any]]:
         raw = (raw or "").strip()
         if not raw:
@@ -704,7 +855,7 @@ class Brain:
             parts.append(f"Emoción facial probable: {visual.face_emotion}.")
         return "Contexto visual actual (úsalo solo para adaptar tu respuesta; no lo narres literalmente): " + " ".join(parts)
 
-    def _agentic_loop(self, messages: List[Dict[str, Any]], *, model: str, temperature: float) -> str:
+    def _agentic_loop(self, messages: List[Dict[str, Any]], *, model: str, temperature: float, workspace_root: str = "", max_tokens: int = 0) -> str:
         """
         Agentic loop: calls LLM with tool definitions, executes tool calls,
         feeds results back, repeats until the LLM returns a plain text response.
@@ -713,7 +864,10 @@ class Brain:
         msgs: List[Dict[str, Any]] = list(messages)
 
         for _ in range(max_iterations):
-            raw: Any = self._chat_with_tools(msgs, model=model, temperature=temperature)
+            if self._check_abort():
+                return "Detenido."
+
+            raw: Any = self._chat_with_tools(msgs, model=model, temperature=temperature, max_tokens=max_tokens)
 
             # If it's a plain string (no tool calls), we're done
             if isinstance(raw, str):
@@ -727,11 +881,93 @@ class Brain:
             text_mode = any(str(tc.get("id", "")).startswith("textcall-") for tc in tool_calls)
 
             if text_mode:
-                # Proxy writes XML in content — keep history as plain user/assistant messages.
-                # Don't add an assistant_msg with tool_calls; the proxy already "said" the XML.
-                tool_results: List[str] = []
+                # TEXT MODE: execute tools ONE BY ONE, feeding each result back so the LLM
+                # can plan the next step instead of running all calls blindly at once.
+                all_tool_results: List[str] = []
+                for tc in tool_calls:
+                    if self._check_abort():
+                        return "Detenido."
+
+                    t_name: str = str(tc["name"])
+                    t_args: Dict[str, Any] = dict(tc["args"])
+                    confirm = self.confirm_fn if t_name in DESTRUCTIVE_TOOLS and self.confirm_fn else None
+
+                    print(f"[YUI] Tool call: {t_name}({t_args})")
+                    if self.step_fn:
+                        try:
+                            detail = t_args.get("path") or t_args.get("command") or None
+                            self.step_fn("tool_start", t_name, str(detail) if detail else None)
+                        except Exception:
+                            pass
+
+                    t_args = _resolve_tool_paths(t_args, workspace_root)
+                    diff_fn = self._make_diff_fn()
+                    t_result = execute_tool(t_name, t_args, confirm_fn=confirm, diff_fn=diff_fn)
+                    print(f"[YUI] Tool result: {t_result[:200]}")
+
+                    if self.step_fn:
+                        try:
+                            self.step_fn("tool_end", t_name, t_result[:120] if t_result else None)
+                        except Exception:
+                            pass
+
+                    all_tool_results.append(f"[{t_name}] {t_result}")
+
+                    # After each tool, inform the LLM and let it decide next step.
+                    # Only do this if there are more tool calls pending after this one.
+                    remaining_idx = tool_calls.index(tc)
+                    if remaining_idx < len(tool_calls) - 1:
+                        msgs.append({
+                            "role": "user",
+                            "content": f"Resultado de {t_name}: {t_result}\nContinúa con el siguiente paso.",
+                        })
+                        try:
+                            _interim = self._chat_with_tools(msgs, model=model, temperature=temperature, max_tokens=max_tokens)
+                            if isinstance(_interim, str):
+                                # LLM decided no more tools needed — return early
+                                clean = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", _interim, flags=re.IGNORECASE).strip()
+                                clean = re.sub(r"<[^>]+>", "", clean).strip()
+                                if clean:
+                                    return clean
+                            # If it returned more tool calls, ignore them — we continue
+                            # with the pre-planned list to avoid runaway loops.
+                        except Exception:
+                            pass
+
+                # Final summary after all tools are done
+                if all_tool_results:
+                    msgs.append({
+                        "role": "user",
+                        "content": (
+                            "Resultados de las herramientas:\n" + "\n".join(all_tool_results) +
+                            "\nAhora responde al usuario en lenguaje natural (1-3 frases) "
+                            "resumiendo exactamente qué archivos creaste, qué hiciste y si todo salió bien. "
+                            "No uses XML ni etiquetas. Solo texto directo."
+                        ),
+                    })
+                    try:
+                        final = self._chat(msgs, model=model, temperature=temperature, max_tokens=max_tokens)
+                        if final and final.strip():
+                            clean = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", final, flags=re.IGNORECASE).strip()
+                            clean = re.sub(r"<[^>]+>", "", clean).strip()
+                            if clean:
+                                had_err = any("[error]" in r or "[cancelado]" in r for r in all_tool_results)
+                                self._publish_task_complete(clean, had_err)
+                                return clean
+                    except Exception:
+                        pass
+                    ok_results = [r for r in all_tool_results if "[error]" not in r and "[cancelado]" not in r]
+                    if ok_results:
+                        lines = "; ".join(r.split("]", 1)[-1].strip() for r in ok_results[:4])
+                        summary = f"Listo. {lines}."
+                        self._publish_task_complete(summary, len(ok_results) < len(all_tool_results))
+                        return summary
+                summary_default = "Listo, completé las operaciones."
+                self._publish_task_complete(summary_default, False)
+                return summary_default
+
             else:
-                # Standard OpenAI tool_calls format
+                # STANDARD MODE: add assistant message with all tool_calls, then execute.
                 assistant_msg: Dict[str, Any] = {
                     "role": "assistant",
                     "content": None,
@@ -745,58 +981,36 @@ class Brain:
                     ],
                 }
                 msgs.append(assistant_msg)
-                tool_results = []
 
-            # Execute each tool and collect results
-            for tc in tool_calls:
-                tool_name: str = str(tc["name"])
-                tool_args: Dict[str, Any] = dict(tc["args"])
-                tool_id: str = str(tc["id"])
+                for tc in tool_calls:
+                    if self._check_abort():
+                        break
 
-                # Confirmation for destructive tools
-                confirm = None
-                if tool_name in DESTRUCTIVE_TOOLS and self.confirm_fn is not None:
-                    confirm = self.confirm_fn
+                    tool_name: str = str(tc["name"])
+                    tool_args: Dict[str, Any] = dict(tc["args"])
+                    tool_id: str = str(tc["id"])
+                    confirm = self.confirm_fn if tool_name in DESTRUCTIVE_TOOLS and self.confirm_fn else None
 
-                print(f"[YUI] Tool call: {tool_name}({tool_args})")
-                if self.step_fn:
-                    try:
-                        detail = tool_args.get("path") or tool_args.get("command") or None
-                        self.step_fn("tool_start", tool_name, str(detail) if detail else None)
-                    except Exception:
-                        pass
-                result = execute_tool(tool_name, tool_args, confirm_fn=confirm)
-                print(f"[YUI] Tool result: {result[:200]}")
-                if self.step_fn:
-                    try:
-                        ok = not result.startswith("[error]") and not result.startswith("[cancelado]")
-                        self.step_fn("tool_end", tool_name, result[:120] if result else None)
-                    except Exception:
-                        pass
-
-                if text_mode:
-                    tool_results.append(f"[{tool_name}] {result}")
-                else:
+                    print(f"[YUI] Tool call: {tool_name}({tool_args})")
+                    if self.step_fn:
+                        try:
+                            detail = tool_args.get("path") or tool_args.get("command") or None
+                            self.step_fn("tool_start", tool_name, str(detail) if detail else None)
+                        except Exception:
+                            pass
+                    tool_args = _resolve_tool_paths(tool_args, workspace_root)
+                    result = execute_tool(tool_name, tool_args, confirm_fn=confirm, diff_fn=self._make_diff_fn())
+                    print(f"[YUI] Tool result: {result[:200]}")
+                    if self.step_fn:
+                        try:
+                            self.step_fn("tool_end", tool_name, result[:120] if result else None)
+                        except Exception:
+                            pass
                     msgs.append({
                         "role": "tool",
                         "tool_call_id": tool_id,
                         "content": result,
                     })
-
-            if text_mode and tool_results:
-                # Feed results back as a user message so the proxy understands,
-                # then do ONE final plain-text call and return immediately.
-                msgs.append({
-                    "role": "user",
-                    "content": "Resultados de las herramientas:\n" + "\n".join(tool_results) + "\nAhora responde al usuario en 1-2 frases resumiendo qué hiciste.",
-                })
-                try:
-                    final = self._chat(msgs, model=model, temperature=temperature)
-                    if final and final.strip():
-                        return final.strip()
-                except Exception:
-                    pass
-                return "Listo, completé las operaciones."
 
         # Exhaust iterations — ask LLM to summarize what was done (no tools this time)
         msgs.append({
@@ -804,14 +1018,15 @@ class Brain:
             "content": "Resume brevemente en 1-2 frases qué hiciste y si todo salió bien.",
         })
         try:
-            summary = self._chat(msgs, model=model, temperature=temperature)
+            summary = self._chat(msgs, model=model, temperature=temperature, max_tokens=max_tokens)
             if summary and summary.strip():
+                self._publish_task_complete(summary.strip(), False)
                 return summary.strip()
         except Exception:
             pass
         return "Completé las operaciones solicitadas."
 
-    def _chat_with_tools(self, messages: List[Dict[str, Any]], *, model: str, temperature: float) -> Any:
+    def _chat_with_tools(self, messages: List[Dict[str, Any]], *, model: str, temperature: float, max_tokens: int = 0) -> Any:
         """
         Calls the LLM with tool definitions.
         Returns either:
@@ -820,17 +1035,17 @@ class Brain:
         """
         try:
             from openai import OpenAI  # type: ignore
-            return self._chat_openai_tools(OpenAI, messages, model=model, temperature=temperature)
+            return self._chat_openai_tools(OpenAI, messages, model=model, temperature=temperature, max_tokens=max_tokens)
         except Exception as exc:
             print(f"[YUI] Tool chat fallback to plain: {type(exc).__name__}: {exc}")
-            return self._chat(messages, model=model, temperature=temperature)
+            return self._chat(messages, model=model, temperature=temperature, max_tokens=max_tokens)
 
-    def _chat_openai_tools(self, OpenAI: Any, messages: List[Dict[str, Any]], *, model: str, temperature: float) -> Any:
+    def _chat_openai_tools(self, OpenAI: Any, messages: List[Dict[str, Any]], *, model: str, temperature: float, max_tokens: int = 0) -> Any:
         """OpenAI SDK variant with tool_choice support."""
         base = self.settings.llm_base_url.rstrip("/")
         client = OpenAI(api_key=self.settings.llm_api_key, base_url=base, timeout=self.settings.llm_timeout_s)
 
-        max_tokens = int(os.getenv("YUI_LLM_MAX_TOKENS") or getattr(self.settings, "llm_max_tokens", 0) or 0)
+        max_tokens = max_tokens or self._base_max_tokens()
         kwargs: Dict[str, Any] = {
             "model": model,
             "messages": messages,
@@ -881,18 +1096,20 @@ class Brain:
         Some models write tool calls as XML in the content instead of using the tool_calls field.
         Parses patterns like:
           <tool_call><function=write_file><parameter=path>...</parameter><parameter=content>...</parameter></function></tool_call>
+        Handles truncated blocks: unclosed </tool_call>, </function>, or </parameter> tags.
         Returns a list of tool call dicts, or empty list if none found.
         """
         import uuid as _uuid
         result: List[Dict[str, Any]] = []
 
-        # Find all <tool_call>...</tool_call> blocks.
-        blocks = re.findall(r"<tool_call>([\s\S]*?)</tool_call>", content, re.IGNORECASE)
-        # Also match unclosed blocks at end of response.
-        if not blocks:
-            m = re.search(r"<tool_call>([\s\S]+)$", content, re.IGNORECASE)
-            if m:
-                blocks = [m.group(1)]
+        # Collect all blocks: closed ones first, then any unclosed block at end of response.
+        blocks: List[str] = re.findall(r"<tool_call>([\s\S]*?)</tool_call>", content, re.IGNORECASE)
+        m = re.search(r"<tool_call>([\s\S]+)$", content, re.IGNORECASE)
+        if m:
+            tail = m.group(1)
+            # Only add if not already captured by a closed block.
+            if not any(tail.strip() == b.strip() for b in blocks):
+                blocks.append(tail)
 
         for block in blocks:
             # Extract function name.
@@ -901,10 +1118,30 @@ class Brain:
                 continue
             fn_name = fn_m.group(1)
 
-            # Extract parameters.
             args: Dict[str, Any] = {}
-            for pm in re.finditer(r"<parameter=(\w+)>([\s\S]*?)</parameter>", block, re.IGNORECASE):
-                args[pm.group(1)] = pm.group(2)
+
+            # Find all parameter start positions to handle truncated last parameter.
+            param_starts = list(re.finditer(r"<parameter=(\w+)>", block, re.IGNORECASE))
+            for i, pm_start in enumerate(param_starts):
+                param_name = pm_start.group(1)
+                value_start = pm_start.end()
+
+                # Find the closing tag for this parameter.
+                close_m = re.search(r"</parameter>", block[value_start:], re.IGNORECASE)
+                if close_m:
+                    value = block[value_start: value_start + close_m.start()]
+                else:
+                    # Truncated: take everything until next <parameter=, </function>, or end of block.
+                    if i + 1 < len(param_starts):
+                        value = block[value_start: param_starts[i + 1].start()]
+                    else:
+                        # Strip trailing </function> or </tool_call> noise if present.
+                        tail_block = block[value_start:]
+                        tail_block = re.sub(r"</function>[\s\S]*$", "", tail_block, flags=re.IGNORECASE)
+                        tail_block = re.sub(r"</tool_call>[\s\S]*$", "", tail_block, flags=re.IGNORECASE)
+                        value = tail_block
+
+                args[param_name] = value
 
             result.append({
                 "id": f"textcall-{_uuid.uuid4().hex[:8]}",
@@ -914,16 +1151,16 @@ class Brain:
 
         return result
 
-    def _chat(self, messages: List[Dict[str, str]], *, model: str, temperature: float) -> str:
+    def _chat(self, messages: List[Dict[str, str]], *, model: str, temperature: float, max_tokens: int = 0) -> str:
         # Prefer OpenAI SDK (works with DeepSeek's OpenAI-compatible API).
         try:
             from openai import OpenAI  # type: ignore
 
-            return self._chat_openai_sdk(OpenAI, messages, model=model, temperature=temperature)
+            return self._chat_openai_sdk(OpenAI, messages, model=model, temperature=temperature, max_tokens=max_tokens)
         except Exception:
-            return self._chat_requests(messages, model=model, temperature=temperature)
+            return self._chat_requests(messages, model=model, temperature=temperature, max_tokens=max_tokens)
 
-    def _chat_openai_sdk(self, OpenAI: Any, messages: List[Dict[str, str]], *, model: str, temperature: float) -> str:
+    def _chat_openai_sdk(self, OpenAI: Any, messages: List[Dict[str, str]], *, model: str, temperature: float, max_tokens: int = 0) -> str:
         base = self.settings.llm_base_url.rstrip("/")
 
         # DeepSeek docs often use base_url="https://api.deepseek.com".
@@ -935,7 +1172,7 @@ class Brain:
             "stream": False,
             "temperature": float(temperature),
         }
-        max_tokens = int(os.getenv("YUI_LLM_MAX_TOKENS") or getattr(self.settings, "llm_max_tokens", 0) or 0)
+        max_tokens = max_tokens or self._base_max_tokens()
         if max_tokens > 0:
             token_key = "max_completion_tokens" if self._is_mimo() else "max_tokens"
             kwargs[token_key] = max_tokens
@@ -958,7 +1195,7 @@ class Brain:
         url = self.settings.llm_base_url
         return "xiaomimimo.com" in url and "token-plan" not in url
 
-    def _chat_requests(self, messages: List[Dict[str, str]], *, model: str, temperature: float) -> str:
+    def _chat_requests(self, messages: List[Dict[str, str]], *, model: str, temperature: float, max_tokens: int = 0) -> str:
         base = self.settings.llm_base_url.rstrip("/")
         if not base.endswith("/v1") and "/v1/" not in (base + "/"):
             base = f"{base}/v1"
@@ -983,7 +1220,7 @@ class Brain:
             "temperature": float(temperature),
             "stream": False,
         }
-        max_tokens = int(os.getenv("YUI_LLM_MAX_TOKENS") or getattr(self.settings, "llm_max_tokens", 0) or 0)
+        max_tokens = max_tokens or self._base_max_tokens()
         if max_tokens > 0:
             # MIMO usa max_completion_tokens en lugar de max_tokens
             token_key = "max_completion_tokens" if mimo else "max_tokens"
