@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import threading
 from queue import Queue
@@ -12,6 +13,7 @@ from requests import HTTPError
 
 from config.settings import Settings
 from core.memory import MemoryStore
+from core.tools import DESTRUCTIVE_TOOLS, TOOL_DEFINITIONS, execute_tool
 
 
 SYSTEM_PROMPT = """
@@ -25,15 +27,21 @@ Ciberseguridad (defensiva):
 - No das instrucciones para hackear, explotar vulnerabilidades, evadir defensas, crear malware o robar información.
   Si te piden eso, rechaza y ofrece alternativas seguras.
 
+Capacidades de agente (herramientas):
+- Puedes crear archivos, carpetas, leer archivos y ejecutar comandos usando las herramientas disponibles.
+- Cuando el usuario te pida crear un proyecto, escribir código, crear un archivo o ejecutar algo, USA las herramientas directamente.
+- No pidas permiso ni expliques lo que vas a hacer antes de hacerlo; simplemente llama la herramienta y reporta el resultado.
+- Si necesitas ver el contenido de un archivo antes de editarlo, usa read_file primero.
+- Encadena herramientas en secuencia cuando sea necesario (crear carpeta → crear archivos → instalar dependencias).
+
 Reglas de conversación:
 - Responde en español.
 - Mantén respuestas breves por voz (1–3 frases) salvo que te pidan detalle.
 - Escribe como conversación hablada: evita Markdown/código y listas largas; usa puntuación natural para pausas.
 - Si hay un usuario identificado por rostro, úsalo por su nombre de forma natural.
 - Si hay gestos o emoción detectados, úsalos solo como contexto para ajustar el tono y las palabras.
-- No menciones gestos/sonrisas/emociones a menos que el usuario lo pida explícitamente (por ejemplo: "¿me ves?", "¿qué gesto hice?", "¿cómo me veo?").
+- No menciones gestos/sonrisas/emociones a menos que el usuario lo pida explícitamente (por ejemplo: “¿me ves?”, “¿qué gesto hice?”, “¿cómo me veo?”).
 - Si falta info, haz 1 pregunta corta.
-- No inventes acciones en el mundo real; ofrece pasos concretos.
 - No escribas acotaciones teatrales ni acciones entre asteriscos/corchetes/paréntesis. Evita cosas como: *asiente*, *sonríe*, (se ríe), [mira la cámara]. Escribe solo lo que dirías en voz alta.
 - Usa recuerdos como contexto implícito: no menciones “memoria” ni que “recuerdas/te acuerdas” (ej. “ahora lo recuerdo”, “lo recuerdo”, “me acuerdo”). Solo usa la info con naturalidad.
 - Si el usuario te acaba de decir un dato, no actúes como si ya lo supieras: acéptalo y sigue la conversación.
@@ -49,9 +57,11 @@ class VisualContext:
 
 
 class Brain:
-    def __init__(self, settings: Settings, memory: MemoryStore):
+    def __init__(self, settings: Settings, memory: MemoryStore, confirm_fn: Optional[Callable[[str], bool]] = None, step_fn: Optional[Callable[[str, str, Optional[str]], None]] = None):
         self.settings = settings
         self.memory = memory
+        self.confirm_fn = confirm_fn  # Called before destructive tool execution
+        self.step_fn = step_fn        # Called with (event, tool_name, detail) for UI progress
         self.last_mode: str = "fast"
         self._postprocess_lock = threading.Lock()
         self._postprocess_scheduled = False
@@ -230,8 +240,15 @@ class Brain:
                 continue
             messages.append({"role": item.role, "content": item.content})
 
+        # Tools are enabled unless explicitly disabled via YUI_TOOLS_ENABLED=0.
+        # YUI_AGENT_TEXT_ONLY only blocks destructive tools (write/run), not read-only ones.
+        tools_enabled = os.getenv("YUI_TOOLS_ENABLED", "1") not in {"0", "false", "False"}
+
         try:
-            response = self._chat(messages, model=str(llm_model), temperature=float(llm_temperature))
+            if tools_enabled:
+                response = self._agentic_loop(messages, model=str(llm_model), temperature=float(llm_temperature))
+            else:
+                response = self._chat(messages, model=str(llm_model), temperature=float(llm_temperature))
         except HTTPError as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
             body = getattr(getattr(e, "response", None), "text", "") or ""
@@ -402,6 +419,14 @@ class Brain:
 
         # Drop an accidental "YUI:" prefix.
         out = re.sub(r"^\s*yui\s*:\s*", "", out, flags=re.IGNORECASE)
+
+        # Strip tool_call blocks the LLM leaks into content (e.g. <tool_call>...</tool_call>).
+        out = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"<function=\w+>[\s\S]*?</function>", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"<parameter=\w+>[\s\S]*?</parameter>", "", out, flags=re.IGNORECASE)
+        # Also strip unclosed/partial tool_call tags that appear at end of response.
+        out = re.sub(r"<tool_call>[\s\S]*$", "", out, flags=re.IGNORECASE)
+        out = re.sub(r"<function=\w+>[\s\S]*$", "", out, flags=re.IGNORECASE)
 
         # Remove SSML/XML tags if the model ever emits them.
         out = re.sub(r"</?speak\b[^>]*>", " ", out, flags=re.IGNORECASE)
@@ -590,10 +615,6 @@ class Brain:
 
     def _maybe_extract_fact(self, user_text: str) -> None:
         """
-        Heurística simple para memoria a largo plazo.
-        Ejemplos:
-        - "me llamo Diego" => name=Diego
-        - "recuerda que mi color favorito es azul" => favorite_color=azul
         """
         t = user_text.strip()
         low = t.lower()
@@ -683,6 +704,216 @@ class Brain:
             parts.append(f"Emoción facial probable: {visual.face_emotion}.")
         return "Contexto visual actual (úsalo solo para adaptar tu respuesta; no lo narres literalmente): " + " ".join(parts)
 
+    def _agentic_loop(self, messages: List[Dict[str, Any]], *, model: str, temperature: float) -> str:
+        """
+        Agentic loop: calls LLM with tool definitions, executes tool calls,
+        feeds results back, repeats until the LLM returns a plain text response.
+        """
+        max_iterations = int(os.getenv("YUI_TOOLS_MAX_ITERATIONS", "8"))
+        msgs: List[Dict[str, Any]] = list(messages)
+
+        for _ in range(max_iterations):
+            raw: Any = self._chat_with_tools(msgs, model=model, temperature=temperature)
+
+            # If it's a plain string (no tool calls), we're done
+            if isinstance(raw, str):
+                return raw
+
+            # raw is a list of tool calls: [{"id": ..., "name": ..., "args": {...}}, ...]
+            tool_calls: List[Dict[str, Any]] = list(raw)
+
+            # Detect if tool calls came from text (XML proxy mode) vs standard tool_calls field.
+            # Text-mode tool calls have ids starting with "textcall-".
+            text_mode = any(str(tc.get("id", "")).startswith("textcall-") for tc in tool_calls)
+
+            if text_mode:
+                # Proxy writes XML in content — keep history as plain user/assistant messages.
+                # Don't add an assistant_msg with tool_calls; the proxy already "said" the XML.
+                tool_results: List[str] = []
+            else:
+                # Standard OpenAI tool_calls format
+                assistant_msg: Dict[str, Any] = {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": str(tc["id"]),
+                            "type": "function",
+                            "function": {"name": str(tc["name"]), "arguments": json.dumps(tc["args"])},
+                        }
+                        for tc in tool_calls
+                    ],
+                }
+                msgs.append(assistant_msg)
+                tool_results = []
+
+            # Execute each tool and collect results
+            for tc in tool_calls:
+                tool_name: str = str(tc["name"])
+                tool_args: Dict[str, Any] = dict(tc["args"])
+                tool_id: str = str(tc["id"])
+
+                # Confirmation for destructive tools
+                confirm = None
+                if tool_name in DESTRUCTIVE_TOOLS and self.confirm_fn is not None:
+                    confirm = self.confirm_fn
+
+                print(f"[YUI] Tool call: {tool_name}({tool_args})")
+                if self.step_fn:
+                    try:
+                        detail = tool_args.get("path") or tool_args.get("command") or None
+                        self.step_fn("tool_start", tool_name, str(detail) if detail else None)
+                    except Exception:
+                        pass
+                result = execute_tool(tool_name, tool_args, confirm_fn=confirm)
+                print(f"[YUI] Tool result: {result[:200]}")
+                if self.step_fn:
+                    try:
+                        ok = not result.startswith("[error]") and not result.startswith("[cancelado]")
+                        self.step_fn("tool_end", tool_name, result[:120] if result else None)
+                    except Exception:
+                        pass
+
+                if text_mode:
+                    tool_results.append(f"[{tool_name}] {result}")
+                else:
+                    msgs.append({
+                        "role": "tool",
+                        "tool_call_id": tool_id,
+                        "content": result,
+                    })
+
+            if text_mode and tool_results:
+                # Feed results back as a user message so the proxy understands,
+                # then do ONE final plain-text call and return immediately.
+                msgs.append({
+                    "role": "user",
+                    "content": "Resultados de las herramientas:\n" + "\n".join(tool_results) + "\nAhora responde al usuario en 1-2 frases resumiendo qué hiciste.",
+                })
+                try:
+                    final = self._chat(msgs, model=model, temperature=temperature)
+                    if final and final.strip():
+                        return final.strip()
+                except Exception:
+                    pass
+                return "Listo, completé las operaciones."
+
+        # Exhaust iterations — ask LLM to summarize what was done (no tools this time)
+        msgs.append({
+            "role": "user",
+            "content": "Resume brevemente en 1-2 frases qué hiciste y si todo salió bien.",
+        })
+        try:
+            summary = self._chat(msgs, model=model, temperature=temperature)
+            if summary and summary.strip():
+                return summary.strip()
+        except Exception:
+            pass
+        return "Completé las operaciones solicitadas."
+
+    def _chat_with_tools(self, messages: List[Dict[str, Any]], *, model: str, temperature: float) -> Any:
+        """
+        Calls the LLM with tool definitions.
+        Returns either:
+        - str: plain text response (no tool calls)
+        - list: list of {"id", "name", "args"} dicts (tool calls to execute)
+        """
+        try:
+            from openai import OpenAI  # type: ignore
+            return self._chat_openai_tools(OpenAI, messages, model=model, temperature=temperature)
+        except Exception as exc:
+            print(f"[YUI] Tool chat fallback to plain: {type(exc).__name__}: {exc}")
+            return self._chat(messages, model=model, temperature=temperature)
+
+    def _chat_openai_tools(self, OpenAI: Any, messages: List[Dict[str, Any]], *, model: str, temperature: float) -> Any:
+        """OpenAI SDK variant with tool_choice support."""
+        base = self.settings.llm_base_url.rstrip("/")
+        client = OpenAI(api_key=self.settings.llm_api_key, base_url=base, timeout=self.settings.llm_timeout_s)
+
+        max_tokens = int(os.getenv("YUI_LLM_MAX_TOKENS") or getattr(self.settings, "llm_max_tokens", 0) or 0)
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "tools": TOOL_DEFINITIONS,
+            "tool_choice": "auto",
+            "stream": False,
+            "temperature": float(temperature),
+        }
+        if max_tokens > 0:
+            token_key = "max_completion_tokens" if self._is_mimo() else "max_tokens"
+            kwargs[token_key] = max_tokens
+
+        try:
+            resp = client.chat.completions.create(**kwargs)
+        except Exception:
+            base_v1 = base if base.endswith("/v1") else f"{base}/v1"
+            if base_v1 != base:
+                client = OpenAI(api_key=self.settings.llm_api_key, base_url=base_v1, timeout=self.settings.llm_timeout_s)
+                resp = client.chat.completions.create(**kwargs)
+            else:
+                raise
+
+        choice = resp.choices[0]
+        msg = choice.message
+
+        # Check for tool calls in the tool_calls field (standard).
+        raw_tool_calls = getattr(msg, "tool_calls", None)
+        if raw_tool_calls:
+            result: List[Dict[str, Any]] = []
+            for tc in raw_tool_calls:
+                try:
+                    args: Dict[str, Any] = json.loads(tc.function.arguments or "{}")
+                except Exception:
+                    args = {}
+                result.append({"id": str(tc.id), "name": str(tc.function.name), "args": args})
+            return result
+
+        # Fallback: some models (e.g. mimo proxy) leak tool calls as text in content.
+        content = msg.content or ""
+        text_calls = self._parse_text_tool_calls(content)
+        if text_calls:
+            return text_calls
+
+        return content
+
+    def _parse_text_tool_calls(self, content: str) -> List[Dict[str, Any]]:
+        """
+        Some models write tool calls as XML in the content instead of using the tool_calls field.
+        Parses patterns like:
+          <tool_call><function=write_file><parameter=path>...</parameter><parameter=content>...</parameter></function></tool_call>
+        Returns a list of tool call dicts, or empty list if none found.
+        """
+        import uuid as _uuid
+        result: List[Dict[str, Any]] = []
+
+        # Find all <tool_call>...</tool_call> blocks.
+        blocks = re.findall(r"<tool_call>([\s\S]*?)</tool_call>", content, re.IGNORECASE)
+        # Also match unclosed blocks at end of response.
+        if not blocks:
+            m = re.search(r"<tool_call>([\s\S]+)$", content, re.IGNORECASE)
+            if m:
+                blocks = [m.group(1)]
+
+        for block in blocks:
+            # Extract function name.
+            fn_m = re.search(r"<function=(\w+)>", block, re.IGNORECASE)
+            if not fn_m:
+                continue
+            fn_name = fn_m.group(1)
+
+            # Extract parameters.
+            args: Dict[str, Any] = {}
+            for pm in re.finditer(r"<parameter=(\w+)>([\s\S]*?)</parameter>", block, re.IGNORECASE):
+                args[pm.group(1)] = pm.group(2)
+
+            result.append({
+                "id": f"textcall-{_uuid.uuid4().hex[:8]}",
+                "name": fn_name,
+                "args": args,
+            })
+
+        return result
+
     def _chat(self, messages: List[Dict[str, str]], *, model: str, temperature: float) -> str:
         # Prefer OpenAI SDK (works with DeepSeek's OpenAI-compatible API).
         try:
@@ -704,7 +935,7 @@ class Brain:
             "stream": False,
             "temperature": float(temperature),
         }
-        max_tokens = int(getattr(self.settings, "llm_max_tokens", 0) or 0)
+        max_tokens = int(os.getenv("YUI_LLM_MAX_TOKENS") or getattr(self.settings, "llm_max_tokens", 0) or 0)
         if max_tokens > 0:
             token_key = "max_completion_tokens" if self._is_mimo() else "max_tokens"
             kwargs[token_key] = max_tokens
@@ -724,7 +955,8 @@ class Brain:
         return resp.choices[0].message.content or ""  # type: ignore[union-attr]
 
     def _is_mimo(self) -> bool:
-        return "xiaomimimo.com" in self.settings.llm_base_url
+        url = self.settings.llm_base_url
+        return "xiaomimimo.com" in url and "token-plan" not in url
 
     def _chat_requests(self, messages: List[Dict[str, str]], *, model: str, temperature: float) -> str:
         base = self.settings.llm_base_url.rstrip("/")
@@ -751,7 +983,7 @@ class Brain:
             "temperature": float(temperature),
             "stream": False,
         }
-        max_tokens = int(getattr(self.settings, "llm_max_tokens", 0) or 0)
+        max_tokens = int(os.getenv("YUI_LLM_MAX_TOKENS") or getattr(self.settings, "llm_max_tokens", 0) or 0)
         if max_tokens > 0:
             # MIMO usa max_completion_tokens en lugar de max_tokens
             token_key = "max_completion_tokens" if mimo else "max_tokens"

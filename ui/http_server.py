@@ -21,6 +21,9 @@ class UiHttpServer:
         get_state: Callable[[], dict[str, Any]],
         on_toggle: Callable[[str, bool], dict[str, Any]],
         on_config: Optional[Callable[[dict[str, str]], dict[str, Any]]] = None,
+        on_clear: Optional[Callable[[], dict[str, Any]]] = None,
+        on_compact: Optional[Callable[[], dict[str, Any]]] = None,
+        on_set_mode: Optional[Callable[[str], dict[str, Any]]] = None,
     ):
         self.host = host
         self.port = int(port)
@@ -29,6 +32,9 @@ class UiHttpServer:
         self.get_state = get_state
         self.on_toggle = on_toggle
         self.on_config = on_config
+        self.on_clear = on_clear
+        self.on_compact = on_compact
+        self.on_set_mode = on_set_mode
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -53,6 +59,9 @@ class UiHttpServer:
         get_state = self.get_state
         on_toggle = self.on_toggle
         on_config = self.on_config
+        on_clear = self.on_clear
+        on_compact = self.on_compact
+        on_set_mode = self.on_set_mode
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
@@ -71,7 +80,7 @@ class UiHttpServer:
 
             def do_POST(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
-                allowed = {"/api/command", "/api/toggle", "/api/config"}
+                allowed = {"/api/command", "/api/toggle", "/api/config", "/api/clear", "/api/compact", "/api/mode"}
                 if parsed.path not in allowed:
                     self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
                     return
@@ -123,6 +132,28 @@ class UiHttpServer:
                         return
                     result = on_config(filtered)
                     self._send_json(result)
+                    return
+
+                if parsed.path == "/api/clear":
+                    if on_clear is None:
+                        self._send_json({"error": "not_supported"}, status=HTTPStatus.NOT_IMPLEMENTED)
+                        return
+                    self._send_json(on_clear())
+                    return
+
+                if parsed.path == "/api/compact":
+                    if on_compact is None:
+                        self._send_json({"error": "not_supported"}, status=HTTPStatus.NOT_IMPLEMENTED)
+                        return
+                    self._send_json(on_compact())
+                    return
+
+                if parsed.path == "/api/mode":
+                    if on_set_mode is None:
+                        self._send_json({"error": "not_supported"}, status=HTTPStatus.NOT_IMPLEMENTED)
+                        return
+                    mode = str(payload.get("mode") or "auto").strip()
+                    self._send_json(on_set_mode(mode))
                     return
 
             def _serve_static(self, raw_path: str) -> None:

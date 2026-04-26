@@ -297,10 +297,10 @@ class HybridBrain:
     - LLM brain handles language/reasoning when needed
     """
 
-    def __init__(self, settings: Settings, memory: MemoryStore):
+    def __init__(self, settings: Settings, memory: MemoryStore, confirm_fn=None, step_fn=None):
         self.settings = settings
         self.memory = memory
-        self.llm = Brain(settings, memory)
+        self.llm = Brain(settings, memory, confirm_fn=confirm_fn, step_fn=step_fn)
         self.style = StylePolicy(memory)
         self.macros = MacroPolicy(memory)
         self.teaching = TeachingModePolicy(memory)

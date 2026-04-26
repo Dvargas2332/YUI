@@ -73,7 +73,7 @@ class YUI:
         self.ui_bus = UiEventBus()
         self.voice = VoiceAssistant(settings, ui_bus=self.ui_bus)
         self.memory = MemoryStore(settings.memory_db_path)
-        self.brain = HybridBrain(settings, self.memory)
+        self.brain = HybridBrain(settings, self.memory, confirm_fn=self._tool_confirm_fn, step_fn=self._tool_step_fn)
         self.catalog = IntegrationCatalog(PROJECT_ROOT)
 
         self._vision_state = VisionState(gestures=[])
@@ -118,6 +118,7 @@ class YUI:
         self._ui_q: "queue.Queue[str]" = queue.Queue()
         self._voice_q: "queue.Queue[str]" = queue.Queue()
         self._voice_thread: Optional[threading.Thread] = None
+        self._pending_tool_confirm = None  # Callable[[str], bool] | None
         self._task_learning: Optional[Dict[str, Any]] = None
         self._task_running: Optional[Dict[str, Any]] = None
         self._task_recorder = TaskRecorder()
@@ -176,6 +177,104 @@ class YUI:
         except Exception:
             pass
 
+    def _tool_confirm_fn(self, description: str) -> bool:
+        """
+        Called by the agentic loop before executing destructive tools.
+        Blocked if YUI_AGENT_TEXT_ONLY=1 (no real-world writes/runs allowed).
+        Auto-approved if YUI_DESKTOP_ENABLED=1 or YUI_TOOLS_AUTOCONFIRM=1.
+        If YUI_CONFIRM_UI_ALLOWED=1 and neither text-only nor auto-approve, shows
+        a blocking confirm banner in the UI and waits for user code input.
+        """
+        import threading as _threading
+        import secrets as _secrets
+
+        text_only = os.getenv("YUI_AGENT_TEXT_ONLY", "0") in {"1", "true", "True"}
+        if text_only:
+            print(f"[YUI] Tool denied (text-only mode): {description}")
+            return False
+
+        desktop_on = os.getenv("YUI_DESKTOP_ENABLED", "0") in {"1", "true", "True"}
+        autoconfirm = os.getenv("YUI_TOOLS_AUTOCONFIRM", "1" if desktop_on else "0") in {"1", "true", "True"}
+
+        if autoconfirm:
+            print(f"[YUI] Tool approved: {description}")
+            return True
+
+        ui_allowed = os.getenv("YUI_CONFIRM_UI_ALLOWED", "1") in {"1", "true", "True"}
+        if not ui_allowed:
+            print(f"[YUI] Tool denied (no confirm method): {description}")
+            return False
+
+        # Interactive UI confirm: show banner, wait for user to type the code.
+        digits = int(os.getenv("YUI_CONFIRM_CODE_DIGITS", "6") or "6")
+        digits = max(4, min(10, digits))
+        code = f"{_secrets.randbelow(10**digits):0{digits}d}"
+        timeout_s = float(os.getenv("YUI_DESKTOP_CONFIRM_TIMEOUT_S", "60") or "60")
+
+        confirmed_event = _threading.Event()
+        cancelled_event = _threading.Event()
+
+        def _resolve(text: str) -> bool:
+            t = (text or "").strip().lower()
+            import re as _re
+            digits_found = "".join(ch for ch in t if ch.isdigit())
+            if code in digits_found or digits_found == code:
+                confirmed_event.set()
+                return True
+            cancel_words = {"cancelar", "cancela", "no", "negativo"}
+            words = [w for w in _re.split(r"\s+", t) if w]
+            if t in cancel_words or (words and words[0] in cancel_words):
+                cancelled_event.set()
+                return True
+            return False
+
+        self._pending_tool_confirm = _resolve
+        try:
+            self.ui_bus.publish("confirm", {
+                "state": "pending",
+                "code": code,
+                "description": description,
+                "timeout_s": timeout_s,
+            })
+        except Exception:
+            pass
+        print(f"[YUI] Confirmación requerida: {description}")
+        print(f"[YUI] Código: {code} (escríbelo en el chat o di 'cancelar')")
+
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            if confirmed_event.is_set():
+                self._pending_tool_confirm = None
+                try:
+                    self.ui_bus.publish("confirm", {"state": "cleared"})
+                except Exception:
+                    pass
+                print(f"[YUI] Tool confirmed: {description}")
+                return True
+            if cancelled_event.is_set():
+                self._pending_tool_confirm = None
+                try:
+                    self.ui_bus.publish("confirm", {"state": "cleared"})
+                except Exception:
+                    pass
+                print(f"[YUI] Tool cancelled: {description}")
+                return False
+            time.sleep(0.1)
+
+        self._pending_tool_confirm = None
+        try:
+            self.ui_bus.publish("confirm", {"state": "cleared"})
+        except Exception:
+            pass
+        print(f"[YUI] Tool confirm timed out: {description}")
+        return False
+
+    def _tool_step_fn(self, event: str, tool_name: str, detail: Optional[str]) -> None:
+        try:
+            self.ui_bus.publish(event, {"tool": tool_name, "detail": detail})
+        except Exception:
+            pass
+
     def _speak(self, text: str, *, mood: Optional[str] = None) -> None:
         spoken = (text or "").strip()
         if not spoken:
@@ -214,9 +313,47 @@ class YUI:
         self._ui_q.put(cmd)
         return True
 
+    def _clear_conversation(self) -> Dict[str, Any]:
+        try:
+            with self.memory._connect() as conn:
+                conn.execute("DELETE FROM messages")
+                conn.commit()
+            self.ui_bus.publish("status", {"cleared": True})
+            return {"ok": True}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _compact_conversation(self) -> Dict[str, Any]:
+        try:
+            with self.memory._connect() as conn:
+                rows = conn.execute(
+                    "SELECT id, role, content FROM messages ORDER BY id DESC LIMIT 20"
+                ).fetchall()
+            rows.reverse()
+            if not rows:
+                return {"ok": True, "kept": 0}
+            min_id = rows[0][0]
+            with self.memory._connect() as conn:
+                conn.execute("DELETE FROM messages WHERE id < ?", (min_id,))
+                conn.commit()
+            self.ui_bus.publish("status", {"compacted": True})
+            return {"ok": True, "kept": len(rows)}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    def _set_llm_mode(self, mode: str) -> Dict[str, Any]:
+        mode = (mode or "auto").strip().lower()
+        if mode not in {"auto", "fast", "deep"}:
+            return {"ok": False, "error": "invalid_mode"}
+        os.environ["YUI_LLM_MODE"] = mode
+        set_env_value(PROJECT_ROOT / ".env", "YUI_LLM_MODE", mode)
+        self.ui_bus.publish("status", {"llm_mode": mode})
+        return {"ok": True, "mode": mode}
+
     def _toggle_runtime_flag(self, key: str, value: bool) -> Dict[str, Any]:
         allowed = {
             "YUI_DESKTOP_ENABLED",
+            "YUI_AGENT_TEXT_ONLY",
             "YUI_SECURITY_GUARD",
             "YUI_SECURITY_WATCH_ENABLED",
             "YUI_CONFIRM_VOICE_ONLY",
@@ -296,6 +433,10 @@ class YUI:
         for _msg_id, item in reversed(self.memory.recent_with_ids(limit=24)):
             history.append({"role": item.role, "content": item.content, "created_at": item.created_at})
 
+        sessions: List[Dict[str, Any]] = []
+        for s in self.memory.list_sessions(limit=20):
+            sessions.append({"session_id": s.session_id, "started_at": s.started_at, "message_count": s.message_count})
+
         pending = getattr(self._desktop.confirm, "pending", None)
         confirmation = None
         if pending is not None:
@@ -328,6 +469,7 @@ class YUI:
 
         permissions = {
             "desktop_enabled": os.getenv("YUI_DESKTOP_ENABLED", "0") in {"1", "true", "True"},
+            "agent_text_only": os.getenv("YUI_AGENT_TEXT_ONLY", "1") in {"1", "true", "True"},
             "security_guard": os.getenv("YUI_SECURITY_GUARD", "0") in {"1", "true", "True"},
             "security_watch": os.getenv("YUI_SECURITY_WATCH_ENABLED", "0") in {"1", "true", "True"},
             "confirm_voice_only": os.getenv("YUI_CONFIRM_VOICE_ONLY", "1") in {"1", "true", "True"},
@@ -340,6 +482,7 @@ class YUI:
         ws_port = self._ui_ws.actual_port if self._ui_ws is not None else int(os.getenv("YUI_UI_WS_PORT", "8765"))
         return {
             "agent_state": "ready",
+            "session_id": self.memory.session_id,
             "ws_port": ws_port,
             "mode": {
                 "input": "text" if self._text_only_mode else "hybrid",
@@ -349,6 +492,7 @@ class YUI:
             },
             "tasks": tasks,
             "history": history,
+            "sessions": sessions,
             "confirmation": confirmation,
             "rules": rules,
             "prompts": prompts,
@@ -427,6 +571,9 @@ class YUI:
                     get_state=self._ui_bootstrap,
                     on_toggle=self._toggle_runtime_flag,
                     on_config=self._handle_config,
+                    on_clear=self._clear_conversation,
+                    on_compact=self._compact_conversation,
+                    on_set_mode=self._set_llm_mode,
                 )
                 self._ui_http.start()
                 self.ui_bus.publish(
@@ -569,8 +716,8 @@ class YUI:
                     continue
 
                 model, temp, mode = self.brain.route(user_text)
-                if mode == "deep":
-                    self.ui_bus.publish("thinking", {"mode": "deep"})
+                self.ui_bus.publish("thinking", {"mode": mode, "state": "start"})
+                print(f"[YUI] Pensando... (modo={mode})", end="", flush=True)
                 if input_source == "voice":
                     self._maybe_voice_ack()
                 t0 = time.time()
@@ -579,15 +726,46 @@ class YUI:
                     screen_ctx = active_window_summary() or None
                 except Exception:
                     screen_ctx = None
-                response = self.brain.reply(
-                    user_text,
-                    visual=visual,
-                    screen_context=screen_ctx,
-                    llm_model=model,
-                    llm_temperature=temp,
-                    llm_mode=mode,
-                )
+
+                _reply_result: list = []
+                _reply_done = threading.Event()
+
+                def _run_reply():
+                    try:
+                        r = self.brain.reply(
+                            user_text,
+                            visual=visual,
+                            screen_context=screen_ctx,
+                            llm_model=model,
+                            llm_temperature=temp,
+                            llm_mode=mode,
+                        )
+                        _reply_result.append(r)
+                    except Exception as _e:
+                        _reply_result.append("")
+                        print(f"\n[YUI] brain.reply error: {type(_e).__name__}: {_e}")
+                    finally:
+                        _reply_done.set()
+
+                _reply_thread = threading.Thread(target=_run_reply, daemon=True, name="yui-brain")
+                _reply_thread.start()
+
+                # While brain works, keep processing confirmations from the main loop.
+                while not _reply_done.is_set():
+                    self._preview_tick()
+                    # Check for tool confirmation input.
+                    if self._pending_tool_confirm is not None:
+                        _confirm_text = self._text_in.get() or self._get_ui_text() or self._get_voice_text()
+                        if _confirm_text:
+                            try:
+                                self._pending_tool_confirm(_confirm_text)
+                            except Exception:
+                                pass
+                    _reply_done.wait(timeout=0.05)
+
                 t1 = time.time()
+                print(f"\r[YUI] Listo ({t1 - t0:.1f}s)          ")
+                response = _reply_result[0] if _reply_result else ""
                 try:
                     full = getattr(self.brain, "last_display_text", None)
                     if isinstance(full, str):
@@ -769,6 +947,20 @@ class YUI:
         if not t:
             return None
         low = t.lower()
+
+        # Session history
+        if any(k in low for k in ["historial sesiones", "sesiones anteriores", "conversaciones anteriores"]):
+            sessions = self.memory.list_sessions(limit=10)
+            if not sessions:
+                return "No hay sesiones anteriores guardadas."
+            lines = []
+            for i, s in enumerate(sessions[:5], 1):
+                dt = s.started_at[:16].replace("T", " ")
+                lines.append(f"{i}. {dt} ({s.message_count} mensajes)")
+            print("[YUI] Historial de sesiones:")
+            for ln in lines:
+                print(f"  {ln}")
+            return f"Hay {len(sessions)} sesión{'es' if len(sessions) != 1 else ''} anterior{'es' if len(sessions) != 1 else ''}. Te mostré las más recientes en consola."
 
         # Quick exits.
         if low in {"salir", "exit", "cerrar", "terminar"}:
@@ -1532,7 +1724,7 @@ class YUI:
         if user_name == self._last_greeted_user:
             return
         self._last_greeted_user = user_name
-        self.voice.speak(f"Hola, {user_name}. Te veo. ¿En qué te ayudo?")
+        self.voice.speak(f"Hola, {user_name}. ¿En qué te ayudo?")
 
     def _maybe_react_to_gestures(self, gestures: List[str], *, user_name: Optional[str], smiling: bool) -> None:
         # Avoid unsolicited voice reactions to gestures (too noisy and can be wrong on webcams).

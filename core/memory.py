@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,10 +18,18 @@ class MemoryItem:
     created_at: str
 
 
+@dataclass(frozen=True)
+class SessionSummary:
+    session_id: str
+    started_at: str
+    message_count: int
+
+
 class MemoryStore:
     def __init__(self, db_path: Path):
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._session_id: str = str(uuid.uuid4())
         self._init_db()
 
     def _connect(self) -> sqlite3.Connection:
@@ -34,10 +43,17 @@ class MemoryStore:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     role TEXT NOT NULL,
                     content TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    session_id TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
+            # Migration: add session_id column if it doesn't exist yet (for existing DBs).
+            try:
+                conn.execute("ALTER TABLE messages ADD COLUMN session_id TEXT NOT NULL DEFAULT ''")
+                conn.commit()
+            except Exception:
+                pass
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS facts (
@@ -118,8 +134,8 @@ class MemoryStore:
         created_at = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO messages (role, content, created_at) VALUES (?, ?, ?)",
-                (role, content, created_at),
+                "INSERT INTO messages (role, content, created_at, session_id) VALUES (?, ?, ?, ?)",
+                (role, content, created_at, self._session_id),
             )
             conn.commit()
 
@@ -357,3 +373,32 @@ class MemoryStore:
         with self._connect() as conn:
             row = conn.execute("SELECT up_to_message_id FROM summaries ORDER BY id DESC LIMIT 1").fetchone()
         return int(row[0]) if row else 0
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+    def list_sessions(self, limit: int = 50) -> List[SessionSummary]:
+        """Returns past sessions ordered by most recent first (excludes current session)."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT session_id, MIN(created_at) AS started_at, COUNT(*) AS msg_count
+                FROM messages
+                WHERE session_id != '' AND session_id != ?
+                GROUP BY session_id
+                ORDER BY started_at DESC
+                LIMIT ?
+                """,
+                (self._session_id, int(limit)),
+            ).fetchall()
+        return [SessionSummary(session_id=str(r[0]), started_at=str(r[1]), message_count=int(r[2])) for r in rows]
+
+    def session_messages(self, session_id: str, limit: int = 200) -> List[MemoryItem]:
+        """Returns all messages from a specific session."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT role, content, created_at FROM messages WHERE session_id=? ORDER BY id ASC LIMIT ?",
+                (session_id, int(limit)),
+            ).fetchall()
+        return [MemoryItem(role=r[0], content=r[1], created_at=r[2]) for r in rows]
