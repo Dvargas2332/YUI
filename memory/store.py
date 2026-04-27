@@ -23,6 +23,8 @@ class SessionSummary:
     session_id: str
     started_at: str
     message_count: int
+    title: str = ""
+    summary: str = ""
 
 
 class MemoryStore:
@@ -30,7 +32,9 @@ class MemoryStore:
         self.db_path = db_path
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._session_id: str = str(uuid.uuid4())
+        self._session_started_at: str = datetime.now(timezone.utc).isoformat()
         self._init_db()
+        self._register_session()
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(str(self.db_path))
@@ -54,6 +58,20 @@ class MemoryStore:
                 conn.commit()
             except Exception:
                 pass
+
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    message_count INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+            conn.commit()
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS facts (
@@ -72,10 +90,17 @@ class MemoryStore:
                     salience REAL NOT NULL DEFAULT 0.5,
                     tags TEXT NOT NULL DEFAULT '',
                     created_at TEXT NOT NULL,
-                    last_used_at TEXT
+                    last_used_at TEXT,
+                    embedding TEXT
                 )
                 """
             )
+            # Migration: add embedding column to existing DBs
+            try:
+                conn.execute("ALTER TABLE memories ADD COLUMN embedding TEXT")
+                conn.commit()
+            except Exception:
+                pass
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS perception_examples (
@@ -176,7 +201,7 @@ class MemoryStore:
             ).fetchall()
         return [(str(r[0]), str(r[1])) for r in rows]
 
-    def add_memory(self, *, user_id: str, content: str, salience: float = 0.6, tags: str = "") -> None:
+    def add_memory(self, *, user_id: str, content: str, salience: float = 0.6, tags: str = "", embedding_json: Optional[str] = None) -> None:
         user_id = (user_id or "default").strip()
         content = (content or "").strip()
         if not content:
@@ -186,19 +211,24 @@ class MemoryStore:
         created_at = datetime.now(timezone.utc).isoformat()
         with self._connect() as conn:
             conn.execute(
-                "INSERT INTO memories (user_id, content, salience, tags, created_at) VALUES (?, ?, ?, ?, ?)",
-                (user_id, content, sal, (tags or "").strip(), created_at),
+                "INSERT INTO memories (user_id, content, salience, tags, created_at, embedding) VALUES (?, ?, ?, ?, ?, ?)",
+                (user_id, content, sal, (tags or "").strip(), created_at, embedding_json),
             )
             conn.commit()
 
-    def recent_memories(self, *, user_id: str, limit: int = 20) -> List[tuple[int, str, float, str]]:
+    def recent_memories(self, *, user_id: str, limit: int = 20) -> List[tuple[int, str, float, str, Optional[str]]]:
         user_id = (user_id or "default").strip()
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, content, salience, tags FROM memories WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                "SELECT id, content, salience, tags, embedding FROM memories WHERE user_id=? ORDER BY id DESC LIMIT ?",
                 (user_id, int(limit)),
             ).fetchall()
-        return [(int(r[0]), str(r[1]), float(r[2]), str(r[3] or "")) for r in rows]
+        return [(int(r[0]), str(r[1]), float(r[2]), str(r[3] or ""), r[4]) for r in rows]
+
+    def update_memory_embedding(self, memory_id: int, embedding_json: str) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE memories SET embedding=? WHERE id=?", (embedding_json, int(memory_id)))
+            conn.commit()
 
     def mark_memory_used(self, memory_ids: List[int]) -> None:
         if not memory_ids:
@@ -374,25 +404,107 @@ class MemoryStore:
             row = conn.execute("SELECT up_to_message_id FROM summaries ORDER BY id DESC LIMIT 1").fetchone()
         return int(row[0]) if row else 0
 
+    def _register_session(self) -> None:
+        """Inserts the current session row so it's visible from the start."""
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO sessions (session_id, started_at) VALUES (?, ?)",
+                (self._session_id, self._session_started_at),
+            )
+            conn.commit()
+
+    def close_session(self, title: str = "", summary: str = "") -> None:
+        """
+        Marks the current session as ended.
+        Called by HybridBrain when the app shuts down or session is explicitly closed.
+        Auto-generates a title from the first user message if none is provided.
+        """
+        ended_at = datetime.now(timezone.utc).isoformat()
+
+        # Count messages in this session
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE session_id=?", (self._session_id,)
+            ).fetchone()
+            msg_count = int(row[0]) if row else 0
+
+            # Auto-title: first user message truncated
+            if not title:
+                first = conn.execute(
+                    "SELECT content FROM messages WHERE session_id=? AND role='user' ORDER BY id ASC LIMIT 1",
+                    (self._session_id,),
+                ).fetchone()
+                if first:
+                    raw = str(first[0]).strip().replace("\n", " ")
+                    title = raw[:60] + ("..." if len(raw) > 60 else "")
+                else:
+                    title = "Sesión sin mensajes"
+
+            conn.execute(
+                """
+                INSERT INTO sessions (session_id, title, summary, started_at, ended_at, message_count)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    title=excluded.title,
+                    summary=excluded.summary,
+                    ended_at=excluded.ended_at,
+                    message_count=excluded.message_count
+                """,
+                (self._session_id, title, summary or "", self._session_started_at, ended_at, msg_count),
+            )
+            conn.commit()
+
+    def update_session_title(self, title: str) -> None:
+        """Lets YUI or the user rename the current session."""
+        title = (title or "").strip()
+        if not title:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET title=? WHERE session_id=?",
+                (title, self._session_id),
+            )
+            conn.commit()
+
+    def update_session_summary(self, summary: str) -> None:
+        """Updates the live summary for the current session (called periodically by brain)."""
+        summary = (summary or "").strip()
+        if not summary:
+            return
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE sessions SET summary=? WHERE session_id=?",
+                (summary, self._session_id),
+            )
+            conn.commit()
+
     @property
     def session_id(self) -> str:
         return self._session_id
 
     def list_sessions(self, limit: int = 50) -> List[SessionSummary]:
-        """Returns past sessions ordered by most recent first (excludes current session)."""
+        """Returns past sessions ordered by most recent first (excludes active session)."""
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT session_id, MIN(created_at) AS started_at, COUNT(*) AS msg_count
-                FROM messages
-                WHERE session_id != '' AND session_id != ?
-                GROUP BY session_id
+                SELECT session_id, started_at, message_count, title, summary
+                FROM sessions
+                WHERE session_id != ?
                 ORDER BY started_at DESC
                 LIMIT ?
                 """,
                 (self._session_id, int(limit)),
             ).fetchall()
-        return [SessionSummary(session_id=str(r[0]), started_at=str(r[1]), message_count=int(r[2])) for r in rows]
+        return [
+            SessionSummary(
+                session_id=str(r[0]),
+                started_at=str(r[1]),
+                message_count=int(r[2]),
+                title=str(r[3] or ""),
+                summary=str(r[4] or ""),
+            )
+            for r in rows
+        ]
 
     def session_messages(self, session_id: str, limit: int = 200) -> List[MemoryItem]:
         """Returns all messages from a specific session."""

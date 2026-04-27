@@ -1,10 +1,18 @@
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
+import re
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeout
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
+
+# Optional dependencies — imported lazily inside functions
+# pip install ddgs requests[socks] beautifulsoup4 lxml
 
 
 def build_diff_payload(path: str, old_lines: List[str], new_lines: List[str]) -> str:
@@ -87,6 +95,81 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "web_search",
+            "description": "Busca información en internet usando DuckDuckGo. Úsalo cuando necesites datos actuales, documentación, noticias o cualquier cosa que no esté en el contexto.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Consulta de búsqueda."},
+                    "max_results": {"type": "integer", "description": "Número máximo de resultados (por defecto 5, máximo 10)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "tor_search",
+            "description": "Busca en internet enrutando la conexión a través de Tor para mayor anonimato. Requiere que Tor esté corriendo en localhost:9050. Si Tor no está disponible, usa conexión normal como fallback.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Consulta de búsqueda."},
+                    "max_results": {"type": "integer", "description": "Número máximo de resultados (por defecto 5, máximo 10)."},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_page",
+            "description": "Descarga y lee el contenido de una página web. Extrae el texto limpio (sin HTML). Úsalo para leer artículos, documentación, foros, o cualquier URL específica.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL completa de la página a descargar."},
+                    "max_chars": {"type": "integer", "description": "Máximo de caracteres a devolver (por defecto 6000)."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_multiple",
+            "description": "Descarga varias URLs en paralelo y devuelve el contenido de cada una. Úsalo para comparar información entre múltiples fuentes al mismo tiempo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "urls": {"type": "array", "items": {"type": "string"}, "description": "Lista de URLs a descargar (máximo 8)."},
+                    "max_chars_each": {"type": "integer", "description": "Máximo de caracteres por página (por defecto 4000)."},
+                },
+                "required": ["urls"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fact_check",
+            "description": "Busca un dato o afirmación en múltiples fuentes independientes y analiza si la información es consistente o contradictoria entre ellas. Detecta posible desinformación.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "claim": {"type": "string", "description": "La afirmación o dato a verificar."},
+                    "num_sources": {"type": "integer", "description": "Número de fuentes a consultar (por defecto 5, máximo 8)."},
+                },
+                "required": ["claim"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "run_command",
             "description": "Ejecuta un comando de shell. Para proyectos: npm install, pip install, git init, etc. Solo usa para comandos seguros y autorizados.",
             "parameters": {
@@ -128,6 +211,16 @@ def execute_tool(
         return _list_dir(args)
     if name == "run_command":
         return _run_command(args, confirm_fn=confirm_fn)
+    if name == "web_search":
+        return _web_search(args)
+    if name == "tor_search":
+        return _tor_search(args)
+    if name == "fetch_page":
+        return _fetch_page(args)
+    if name == "fetch_multiple":
+        return _fetch_multiple(args)
+    if name == "fact_check":
+        return _fact_check(args)
     return f"[error] Herramienta desconocida: {name}"
 
 
@@ -312,3 +405,400 @@ def _run_command(args: Dict[str, Any], *, confirm_fn: Optional[Callable[[str], b
 
     except Exception as e:
         return f"[error] {e}"
+
+
+def _format_ddg_results(results: List[Dict[str, Any]]) -> str:
+    if not results:
+        return "[sin resultados]"
+    lines = []
+    for i, r in enumerate(results, 1):
+        title = r.get("title", "Sin título")
+        url = r.get("href", r.get("url", ""))
+        body = r.get("body", r.get("snippet", "")).strip().replace("\n", " ")
+        if len(body) > 300:
+            body = body[:300] + "..."
+        lines.append(f"{i}. {title}\n   {url}\n   {body}")
+    return "\n\n".join(lines)
+
+
+def _web_search(args: Dict[str, Any]) -> str:
+    query = str(args.get("query", "")).strip()
+    if not query:
+        return "[error] query es requerido"
+    max_results = min(int(args.get("max_results", 5)), 10)
+
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        return "[error] Instala ddgs: pip install ddgs"
+
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        return f"[web_search: {query}]\n\n" + _format_ddg_results(results)
+    except Exception as e:
+        return f"[error] Búsqueda fallida: {e}"
+
+
+def _get_session():
+    """Returns a requests.Session with browser-like headers."""
+    try:
+        import requests
+    except ImportError:
+        return None
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+        "Accept-Language": "es-MX,es;q=0.9,en;q=0.8",
+    })
+    return s
+
+
+def _extract_text(html: str, max_chars: int) -> str:
+    """Extracts clean readable text from HTML using BeautifulSoup."""
+    try:
+        from bs4 import BeautifulSoup
+    except ImportError:
+        # Fallback: strip tags with regex
+        text = re.sub(r"<[^>]+>", " ", html)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text[:max_chars]
+
+    soup = BeautifulSoup(html, "lxml" if _has_lxml() else "html.parser")
+    for tag in soup(["script", "style", "nav", "footer", "header", "aside", "form", "noscript"]):
+        tag.decompose()
+
+    # Prefer article/main content blocks
+    main = soup.find("article") or soup.find("main") or soup.find(id=re.compile(r"content|main|article", re.I))
+    target = main if main else soup.body if soup.body else soup
+
+    lines = []
+    for elem in target.find_all(["p", "h1", "h2", "h3", "h4", "li", "blockquote", "td"]):
+        t = elem.get_text(" ", strip=True)
+        if len(t) > 30:
+            lines.append(t)
+
+    text = "\n".join(lines)
+    if not text.strip():
+        text = target.get_text(" ", strip=True)
+        text = re.sub(r"\s+", " ", text).strip()
+
+    return text[:max_chars]
+
+
+def _has_lxml() -> bool:
+    try:
+        import lxml  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _fetch_url(url: str, max_chars: int = 6000, timeout: int = 15) -> Tuple[str, str]:
+    """Downloads a URL and returns (url, extracted_text_or_error)."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return url, f"[error] Esquema no permitido: {parsed.scheme}"
+
+    session = _get_session()
+    if session is None:
+        return url, "[error] Instala requests: pip install requests"
+
+    try:
+        resp = session.get(url, timeout=timeout, allow_redirects=True)
+        resp.raise_for_status()
+        ct = resp.headers.get("Content-Type", "")
+        if "text" not in ct and "html" not in ct and "json" not in ct:
+            return url, f"[skip] Tipo de contenido no legible: {ct}"
+        if "json" in ct:
+            return url, resp.text[:max_chars]
+        return url, _extract_text(resp.text, max_chars)
+    except Exception as e:
+        return url, f"[error] {e}"
+
+
+def _fetch_page(args: Dict[str, Any]) -> str:
+    url = str(args.get("url", "")).strip()
+    if not url:
+        return "[error] url es requerido"
+    max_chars = min(int(args.get("max_chars", 6000)), 20000)
+
+    _, text = _fetch_url(url, max_chars=max_chars)
+    if not text.strip():
+        return f"[fetch_page: {url}]\n[sin contenido legible]"
+    return f"[fetch_page: {url}]\n\n{text}"
+
+
+def _fetch_multiple(args: Dict[str, Any]) -> str:
+    urls: List[str] = [str(u).strip() for u in args.get("urls", []) if str(u).strip()]
+    if not urls:
+        return "[error] urls es requerido"
+    urls = urls[:8]
+    max_chars = min(int(args.get("max_chars_each", 4000)), 10000)
+
+    results: Dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=min(len(urls), 6)) as pool:
+        futures = {pool.submit(_fetch_url, u, max_chars): u for u in urls}
+        try:
+            for fut in as_completed(futures, timeout=30):
+                url, text = fut.result()
+                results[url] = text
+        except FuturesTimeout:
+            for fut, u in futures.items():
+                if u not in results:
+                    results[u] = "[error] Tiempo agotado"
+
+    parts = []
+    for i, u in enumerate(urls, 1):
+        text = results.get(u, "[sin respuesta]")
+        parts.append(f"--- Fuente {i}: {u} ---\n{text}")
+    return "\n\n".join(parts)
+
+
+def _fact_check(args: Dict[str, Any]) -> str:
+    claim = str(args.get("claim", "")).strip()
+    if not claim:
+        return "[error] claim es requerido"
+    num_sources = min(int(args.get("num_sources", 5)), 8)
+
+    # Step 1: search for the claim + counter-claim
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        return "[error] Instala ddgs: pip install ddgs"
+
+    queries = [
+        f'"{claim}" verdadero falso',
+        f"{claim} fact check verificación fuente",
+        f"{claim} es cierto evidencia científica",
+        f"{claim} debunked myth false",
+    ]
+
+    all_urls: List[str] = []
+    seen: set = set()
+    try:
+        with DDGS() as ddgs:
+            for q in queries:
+                for r in ddgs.text(q, max_results=4):
+                    u = r.get("href", r.get("url", ""))
+                    if u and u not in seen:
+                        seen.add(u)
+                        all_urls.append(u)
+                if len(all_urls) >= num_sources * 2:
+                    break
+    except Exception as e:
+        return f"[error] Búsqueda fallida: {e}"
+
+    urls_to_fetch = all_urls[:num_sources]
+    if not urls_to_fetch:
+        return "[fact_check] No se encontraron fuentes."
+
+    # Step 2: download pages in parallel
+    page_contents: List[Tuple[str, str]] = []
+    with ThreadPoolExecutor(max_workers=min(len(urls_to_fetch), 5)) as pool:
+        futures = {pool.submit(_fetch_url, u, 3000): u for u in urls_to_fetch}
+        try:
+            for fut in as_completed(futures, timeout=25):
+                page_contents.append(fut.result())
+        except FuturesTimeout:
+            pass
+
+    # Step 3: build structured report
+    lines = [f"[fact_check] Afirmación: «{claim}»", f"Fuentes consultadas: {len(page_contents)}", ""]
+
+    supports, contradicts, unclear = [], [], []
+    claim_words = set(re.findall(r"\w+", claim.lower()))
+
+    for url, text in page_contents:
+        if text.startswith("[error") or text.startswith("[skip"):
+            continue
+        text_low = text.lower()
+        neg_signals = [
+                "falso", "mito", "incorrecto", "desinformación", "fake", "false", "myth",
+                "no es cierto", "no es verdad", "engaño", "rumor", "sin evidencia",
+                "teoría de conspiración", "conspiracy", "pseudoscience", "pseudociencia",
+                "debunked", "refutado", "no tiene base", "carece de evidencia",
+            ]
+        pos_signals = [
+                "confirmado", "verdadero", "correcto", "cierto", "comprobado",
+                "true", "confirmed", "correct", "evidence shows", "studies show",
+                "scientific consensus", "consenso científico", "demostrado",
+            ]
+        # Signals that a source is debunking/explaining a false claim (context clue)
+        debunk_context = [
+                "por qué hay gente que cree", "why people believe", "believers claim",
+                "flat earth", "terraplanista", "terraplanismo", "tierra plana",
+                "gente que aún cree", "still believe", "conspiracy theorists",
+                "the myth", "el mito", "la creencia errónea",
+            ]
+
+        neg_hits = sum(1 for s in neg_signals if s in text_low)
+        pos_hits = sum(1 for s in pos_signals if s in text_low)
+        debunk_hits = sum(1 for s in debunk_context if s in text_low)
+        # Debunking articles count as contradiction evidence
+        neg_hits += debunk_hits // 2
+        # How relevant is this page to the claim?
+        overlap = sum(1 for w in claim_words if len(w) > 4 and w in text_low)
+
+        domain = urlparse(url).netloc
+        snippet = text[:200].replace("\n", " ")
+
+        if neg_hits > pos_hits and overlap > 1:
+            contradicts.append(f"  [NO] {domain}: {snippet}...")
+        elif pos_hits > neg_hits and overlap > 1:
+            supports.append(f"  [SI] {domain}: {snippet}...")
+        else:
+            unclear.append(f"  [?] {domain}: {snippet}...")
+
+    if supports:
+        lines.append(f"FUENTES QUE APOYAN ({len(supports)}):")
+        lines.extend(supports)
+        lines.append("")
+    if contradicts:
+        lines.append(f"FUENTES QUE CONTRADICEN ({len(contradicts)}):")
+        lines.extend(contradicts)
+        lines.append("")
+    if unclear:
+        lines.append(f"FUENTES AMBIGUAS ({len(unclear)}):")
+        lines.extend(unclear)
+        lines.append("")
+
+    # Verdict
+    if contradicts and not supports:
+        verdict = "PROBABLE DESINFORMACIÓN — múltiples fuentes contradicen la afirmación."
+    elif supports and not contradicts:
+        verdict = "INFORMACIÓN CONSISTENTE — las fuentes consultadas la apoyan."
+    elif contradicts and supports:
+        verdict = "INFORMACIÓN DISPUTADA — hay fuentes a favor y en contra. Verificar con fuentes primarias."
+    else:
+        verdict = "INDETERMINADO — no se pudo extraer suficiente contexto de las fuentes."
+
+    lines.append(f"VEREDICTO: {verdict}")
+    return "\n".join(lines)
+
+
+def _tor_search(args: Dict[str, Any]) -> str:
+    query = str(args.get("query", "")).strip()
+    if not query:
+        return "[error] query es requerido"
+    max_results = min(int(args.get("max_results", 5)), 10)
+
+    try:
+        from ddgs import DDGS
+    except ImportError:
+        return "[error] Instala ddgs: pip install ddgs"
+
+    # Try via Tor SOCKS5 proxy (requires requests[socks])
+    tor_proxy = {"http": "socks5h://127.0.0.1:9050", "https": "socks5h://127.0.0.1:9050"}
+    via_tor = False
+    try:
+        import requests
+        r = requests.get("https://check.torproject.org/api/ip", proxies=tor_proxy, timeout=8)
+        via_tor = r.json().get("IsTor", False)
+    except Exception:
+        pass
+
+    try:
+        if via_tor:
+            with DDGS(proxies=tor_proxy, timeout=20) as ddgs:
+                results = list(ddgs.text(query, max_results=max_results))
+            prefix = "[tor_search (via Tor)"
+        else:
+            # Tor not available — fallback to clearnet
+            with DDGS() as ddgs:
+                results = list(ddgs.text(query, max_results=max_results))
+            prefix = "[tor_search (Tor no disponible, usando clearnet)"
+
+        return f"{prefix}: {query}]\n\n" + _format_ddg_results(results)
+    except Exception as e:
+        return f"[error] Búsqueda fallida: {e}"
+
+
+# ── Plugin system ─────────────────────────────────────────────────────────────
+
+_PLUGINS_ROOT = Path(__file__).parent.parent / "plugins"
+
+# Runtime registry: tool_name -> handler function (loaded from plugin.py)
+_plugin_tool_handlers: Dict[str, Callable[..., str]] = {}
+# Extra tool definitions injected by enabled plugins
+_plugin_tool_definitions: List[Dict[str, Any]] = []
+
+
+def _load_plugins() -> None:
+    """
+    Scans plugins/ directory, loads enabled plugins, registers their tool
+    definitions and handlers. Safe to call multiple times — re-scans each time
+    so enabling/disabling a plugin takes effect on the next call.
+    """
+    global _plugin_tool_handlers, _plugin_tool_definitions
+    _plugin_tool_handlers = {}
+    _plugin_tool_definitions = []
+
+    if not _PLUGINS_ROOT.exists():
+        return
+
+    for entry in sorted(_PLUGINS_ROOT.iterdir()):
+        if not entry.is_dir():
+            continue
+        manifest_path = entry / "plugin.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+
+        if not manifest.get("enabled", False):
+            continue
+
+        entrypoint = entry / manifest.get("entrypoint", "plugin.py")
+        if not entrypoint.exists():
+            continue
+
+        try:
+            spec = importlib.util.spec_from_file_location(
+                f"yui_plugin_{entry.name}", str(entrypoint)
+            )
+            if spec is None or spec.loader is None:
+                continue
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+        except Exception as e:
+            print(f"[YUI Plugin] Error cargando {entry.name}: {e}")
+            continue
+
+        if not hasattr(mod, "register"):
+            continue
+        try:
+            reg = mod.register()
+        except Exception as e:
+            print(f"[YUI Plugin] Error en register() de {entry.name}: {e}")
+            continue
+
+        # Each plugin returns {"tools": [...openai-format...], "handlers": {name: fn}}
+        for tool_def in reg.get("tools", []):
+            _plugin_tool_definitions.append(tool_def)
+            print(f"[YUI Plugin] Tool registrado: {tool_def.get('function', {}).get('name')} ({entry.name})")
+
+        for name, fn in reg.get("handlers", {}).items():
+            _plugin_tool_handlers[name] = fn
+
+
+def get_all_tool_definitions() -> List[Dict[str, Any]]:
+    """Returns base tools + all enabled plugin tools."""
+    _load_plugins()
+    return TOOL_DEFINITIONS + _plugin_tool_definitions
+
+
+def execute_plugin_tool(name: str, args: Dict[str, Any]) -> Optional[str]:
+    """
+    Executes a tool registered by a plugin. Returns result string or None if
+    the tool name is not from any plugin.
+    """
+    fn = _plugin_tool_handlers.get(name)
+    if fn is None:
+        return None
+    try:
+        return str(fn(args))
+    except Exception as e:
+        return f"[error] Plugin tool {name} falló: {e}"

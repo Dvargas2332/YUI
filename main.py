@@ -25,8 +25,7 @@ from typing import Any, Callable, Dict, List, Optional
 from dotenv import load_dotenv
 
 from config.settings import PROJECT_ROOT, Settings
-from ai.brain import VisualContext
-from ai.hybrid_brain import HybridBrain
+from ai.brain import Brain, VisualContext
 from integrations import IntegrationCatalog
 from perception.face_authentication import FaceAuthenticator
 from memory.store import MemoryStore
@@ -73,7 +72,7 @@ class YUI:
         self.ui_bus = UiEventBus()
         self.voice = VoiceAssistant(settings, ui_bus=self.ui_bus)
         self.memory = MemoryStore(settings.memory_db_path)
-        self.brain = HybridBrain(settings, self.memory, confirm_fn=self._tool_confirm_fn, step_fn=self._tool_step_fn)
+        self.brain = Brain(settings, self.memory, confirm_fn=self._tool_confirm_fn, step_fn=self._tool_step_fn)
         self.catalog = IntegrationCatalog(PROJECT_ROOT)
 
         self._vision_state = VisionState(gestures=[])
@@ -306,6 +305,28 @@ class YUI:
                     else:
                         spoken = f"{spoken} Mira el código en pantalla."
 
+        self.voice.speak(spoken, mood=mood)
+
+    def _speak_tts_only(self, text: str, *, mood: Optional[str] = None) -> None:
+        """Like _speak but skips the UI publish — used when UI was already updated separately."""
+        spoken = (text or "").strip()
+        if not spoken:
+            return
+        speak_code = os.getenv("YUI_CONFIRM_SPEAK_CODE", "1") not in {"0", "false", "False"}
+        if not speak_code:
+            try:
+                pending = getattr(self._desktop.confirm, "pending", None)
+            except Exception:
+                pending = None
+            if pending is not None:
+                try:
+                    code = str(getattr(pending, "code", "") or "").strip()
+                except Exception:
+                    code = ""
+                if code and code in spoken:
+                    spoken = spoken.replace(code, "").strip()
+                    spoken = " ".join(spoken.split())
+                    spoken = spoken or "Mira el código en pantalla."
         self.voice.speak(spoken, mood=mood)
 
     def _enqueue_ui_command(self, text: str, workspace_root: str = "") -> bool:
@@ -857,18 +878,28 @@ class YUI:
                 t1 = time.time()
                 print(f"\r[YUI] Listo ({t1 - t0:.1f}s)          ")
                 response = _reply_result[0] if _reply_result else ""
+                # Determine what to show in UI vs what to speak aloud
+                full_display: Optional[str] = None
                 try:
-                    full = getattr(self.brain, "last_display_text", None)
-                    if isinstance(full, str):
-                        full = full.strip()
-                    else:
-                        full = None
-                    if full and full != (response or "").strip():
-                        print("\n[YUI] Detalle:")
-                        print(full)
+                    _fd = getattr(self.brain, "last_display_text", None)
+                    if isinstance(_fd, str):
+                        _fd = _fd.strip() or None
+                    if _fd and _fd != (response or "").strip():
+                        full_display = _fd
+                        print(f"\n[YUI] Detalle:\n{full_display}")
                 except Exception:
                     pass
-                self._speak(response, mood=visual.face_emotion)
+
+                if full_display:
+                    # UI receives full rich text (markdown); TTS gets the short spoken version
+                    self.ui_bus.publish("assistant", {
+                        "text": full_display,
+                        "spoken": response,
+                        "mood": visual.face_emotion,
+                    })
+                    self._speak_tts_only(response)
+                else:
+                    self._speak(response, mood=visual.face_emotion)
                 t2 = time.time()
                 if os.getenv("YUI_DEBUG_LATENCY", "0") not in {"0", "false", "False"}:
                     print(f"[YUI] Latency: llm={t1 - t0:.2f}s tts={t2 - t1:.2f}s total={t2 - t0:.2f}s mode={mode}")
@@ -941,6 +972,10 @@ class YUI:
                 cv2.destroyAllWindows()
             except BaseException:
                 pass
+        try:
+            self.brain.shutdown()
+        except BaseException:
+            pass
 
     def _start_voice_thread(self) -> None:
         if self._voice_thread is not None and self._voice_thread.is_alive():
