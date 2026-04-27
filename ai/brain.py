@@ -330,6 +330,9 @@ class Brain:
                 continue
             messages.append({"role": item.role, "content": item.content})
 
+        # Current user message (not yet in memory when this runs)
+        messages.append({"role": "user", "content": user_text})
+
         return messages
 
     def _synthesize(self, raw_response: str, **_kwargs) -> SynthesizedOutput:
