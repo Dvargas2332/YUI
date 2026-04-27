@@ -871,6 +871,10 @@ class YUI:
                                 self._pending_tool_confirm(_incoming)
                             except Exception:
                                 pass
+                        else:
+                            # Re-enqueue messages that arrived while brain was busy
+                            # so they are processed after the current reply completes.
+                            self._ui_q.put((_incoming, self._workspace_root or ""))
                     _reply_done.wait(timeout=0.05)
 
                 self.ui_bus.publish("busy", {"state": "end"})
