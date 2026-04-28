@@ -356,7 +356,7 @@ class Reasoner:
                         except Exception:
                             pass
                     t_args = _resolve_tool_paths(t_args, workspace_root)
-                    t_result = execute_tool(t_name, t_args, confirm_fn=confirm, diff_fn=self._make_diff_fn())
+                    t_result = execute_tool(t_name, t_args, confirm_fn=confirm, diff_fn=self._make_diff_fn(), store=self.memory)
                     if t_result.startswith("[error] Herramienta desconocida"):
                         plugin_result = execute_plugin_tool(t_name, t_args)
                         if plugin_result is not None:
@@ -444,7 +444,7 @@ class Reasoner:
                         except Exception:
                             pass
                     tool_args = _resolve_tool_paths(tool_args, workspace_root)
-                    result = execute_tool(tool_name, tool_args, confirm_fn=confirm, diff_fn=self._make_diff_fn())
+                    result = execute_tool(tool_name, tool_args, confirm_fn=confirm, diff_fn=self._make_diff_fn(), store=self.memory)
                     if result.startswith("[error] Herramienta desconocida"):
                         plugin_result = execute_plugin_tool(tool_name, tool_args)
                         if plugin_result is not None:

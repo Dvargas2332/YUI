@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from config.settings import Settings
 from memory.store import MemoryStore
 from memory.user_profile import UserProfile
+from memory.agenda import AgendaManager
 from ai.modules.context import VisualContext
 from ai.modules.persona import StylePolicy, MacroPolicy, TeachingModePolicy
 from ai.modules.memory import SessionPolicy
@@ -63,6 +64,10 @@ class Brain:
 
         # User profile (persistent semantic model of the user)
         self.user_profile = UserProfile(memory)
+
+        # Agenda: background thread fires reminders into the conversation
+        self.agenda = AgendaManager(memory, on_reminder=self._inject_reminder)
+        self.agenda.start()
 
         # State
         self.last_display_text: Optional[str] = None
@@ -205,6 +210,10 @@ class Brain:
 
     def shutdown(self) -> None:
         try:
+            self.agenda.stop()
+        except Exception:
+            pass
+        try:
             self.memory.close_session()
         except Exception:
             pass
@@ -227,6 +236,10 @@ class Brain:
         return getattr(self.reasoner, "last_mode", "fast")
 
     # ── Internal helpers ──────────────────────────────────────────────────────
+
+    def _inject_reminder(self, message: str) -> None:
+        """Called by AgendaManager when a reminder is due. Injects it as a system message."""
+        self.memory.add("system", message)
 
     def _make_step_fn(self, outer_step_fn) -> Optional[Callable]:
         planner = self.planner

@@ -150,6 +150,20 @@ class MemoryStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS agenda (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    title TEXT NOT NULL,
+                    due_at TEXT NOT NULL,
+                    recurrence TEXT NOT NULL DEFAULT 'none',
+                    notes TEXT NOT NULL DEFAULT '',
+                    done INTEGER NOT NULL DEFAULT 0,
+                    notified INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
             conn.commit()
 
     def add(self, role: Role, content: str) -> None:
@@ -505,6 +519,65 @@ class MemoryStore:
             )
             for r in rows
         ]
+
+    # ── Agenda ────────────────────────────────────────────────────────────────
+
+    def agenda_add(self, *, title: str, due_at: str, recurrence: str = "none", notes: str = "") -> int:
+        created_at = datetime.now(timezone.utc).isoformat()
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO agenda (title, due_at, recurrence, notes, created_at) VALUES (?, ?, ?, ?, ?)",
+                (title.strip(), due_at.strip(), recurrence.strip() or "none", notes.strip(), created_at),
+            )
+            conn.commit()
+            return int(cur.lastrowid)
+
+    def agenda_list(self, *, include_done: bool = False, limit: int = 50) -> List[dict]:
+        with self._connect() as conn:
+            if include_done:
+                rows = conn.execute(
+                    "SELECT id, title, due_at, recurrence, notes, done, notified, created_at FROM agenda ORDER BY due_at ASC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT id, title, due_at, recurrence, notes, done, notified, created_at FROM agenda WHERE done=0 ORDER BY due_at ASC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+        return [
+            {"id": r[0], "title": r[1], "due_at": r[2], "recurrence": r[3],
+             "notes": r[4], "done": bool(r[5]), "notified": bool(r[6]), "created_at": r[7]}
+            for r in rows
+        ]
+
+    def agenda_due(self, now_iso: str) -> List[dict]:
+        """Returns pending items whose due_at <= now and not yet notified."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, title, due_at, recurrence, notes FROM agenda WHERE done=0 AND notified=0 AND due_at <= ?",
+                (now_iso,),
+            ).fetchall()
+        return [{"id": r[0], "title": r[1], "due_at": r[2], "recurrence": r[3], "notes": r[4]} for r in rows]
+
+    def agenda_mark_notified(self, item_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE agenda SET notified=1 WHERE id=?", (int(item_id),))
+            conn.commit()
+
+    def agenda_mark_done(self, item_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE agenda SET done=1 WHERE id=?", (int(item_id),))
+            conn.commit()
+
+    def agenda_delete(self, item_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM agenda WHERE id=?", (int(item_id),))
+            conn.commit()
+
+    def agenda_reschedule(self, item_id: int, new_due_at: str) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE agenda SET due_at=?, notified=0 WHERE id=?", (new_due_at.strip(), int(item_id)))
+            conn.commit()
 
     def session_messages(self, session_id: str, limit: int = 200) -> List[MemoryItem]:
         """Returns all messages from a specific session."""

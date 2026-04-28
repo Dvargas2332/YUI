@@ -375,6 +375,66 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             },
         },
     },
+    # ── Agenda ────────────────────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "agenda_add",
+            "description": "Agrega un recordatorio o tarea a la agenda del usuario. Úsala cuando el usuario diga 'recuérdame', 'agéndame', 'ponme un recordatorio', etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Título corto del recordatorio o tarea."},
+                    "due_at": {"type": "string", "description": "Fecha y hora en formato ISO 8601 (UTC). Ej: '2026-04-28T15:00:00+00:00'."},
+                    "recurrence": {"type": "string", "description": "Repetición: 'none', 'daily', 'weekly', 'monthly'. Por defecto 'none'.", "enum": ["none", "daily", "weekly", "monthly"]},
+                    "notes": {"type": "string", "description": "Notas adicionales opcionales."},
+                },
+                "required": ["title", "due_at"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agenda_list",
+            "description": "Lista los recordatorios y tareas pendientes de la agenda.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "include_done": {"type": "boolean", "description": "Si es true, incluye también los completados. Por defecto false."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agenda_done",
+            "description": "Marca un item de la agenda como completado.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer", "description": "ID del item a marcar como completado."},
+                },
+                "required": ["id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "agenda_delete",
+            "description": "Elimina un item de la agenda.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer", "description": "ID del item a eliminar."},
+                },
+                "required": ["id"],
+            },
+        },
+    },
 ]
 
 # Tools that require confirmation before execution
@@ -387,6 +447,7 @@ def execute_tool(
     *,
     confirm_fn: Optional[Callable[[str], bool]] = None,
     diff_fn: Optional[Callable[[str, List[str], List[str]], None]] = None,
+    store: Optional[Any] = None,
 ) -> str:
     """
     Execute a tool by name with the given arguments.
@@ -422,6 +483,9 @@ def execute_tool(
         "wappalyzer_analyze",
     }:
         return _dispatch_browser(name, args, confirm_fn=confirm_fn)
+    # ── Agenda ────────────────────────────────────────────────────────────────
+    if name in {"agenda_add", "agenda_list", "agenda_done", "agenda_delete"}:
+        return _dispatch_agenda(name, args, store=store)
     return f"[error] Herramienta desconocida: {name}"
 
 
@@ -477,6 +541,48 @@ def _dispatch_browser(
     if name == "wappalyzer_analyze":
         return wappalyzer_analyze(args["url"])
     return f"[error] Herramienta desconocida: {name}"
+
+
+def _dispatch_agenda(name: str, args: Dict[str, Any], *, store: Optional[Any] = None) -> str:
+    if store is None:
+        try:
+            from memory.store import MemoryStore
+            store = MemoryStore(Path("data/memory.db"))
+        except Exception as e:
+            return f"[error] No se pudo acceder a la agenda: {e}"
+    _store = store
+
+    if name == "agenda_add":
+        item_id = _store.agenda_add(
+            title=args["title"],
+            due_at=args["due_at"],
+            recurrence=args.get("recurrence", "none"),
+            notes=args.get("notes", ""),
+        )
+        rec = args.get("recurrence", "none")
+        rec_txt = f" (repite: {rec})" if rec != "none" else ""
+        return f"[ok] Recordatorio #{item_id} agendado: '{args['title']}' para {args['due_at']}{rec_txt}"
+
+    if name == "agenda_list":
+        items = _store.agenda_list(include_done=args.get("include_done", False))
+        if not items:
+            return "[ok] No hay recordatorios pendientes."
+        lines = ["Agenda pendiente:"]
+        for it in items:
+            rec = f" [{it['recurrence']}]" if it["recurrence"] != "none" else ""
+            notes = f" — {it['notes']}" if it["notes"] else ""
+            lines.append(f"  #{it['id']} {it['title']} | {it['due_at']}{rec}{notes}")
+        return "\n".join(lines)
+
+    if name == "agenda_done":
+        _store.agenda_mark_done(int(args["id"]))
+        return f"[ok] Item #{args['id']} marcado como completado."
+
+    if name == "agenda_delete":
+        _store.agenda_delete(int(args["id"]))
+        return f"[ok] Item #{args['id']} eliminado de la agenda."
+
+    return f"[error] Acción de agenda desconocida: {name}"
 
 
 def _write_file(
