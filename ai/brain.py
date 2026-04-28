@@ -23,6 +23,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from config.settings import Settings
 from memory.store import MemoryStore
+from memory.user_profile import UserProfile
 from ai.modules.context import VisualContext
 from ai.modules.persona import StylePolicy, MacroPolicy, TeachingModePolicy
 from ai.modules.memory import SessionPolicy
@@ -59,6 +60,9 @@ class Brain:
             confirm_fn=confirm_fn,
             step_fn=self._make_step_fn(step_fn),
         )
+
+        # User profile (persistent semantic model of the user)
+        self.user_profile = UserProfile(memory)
 
         # State
         self.last_display_text: Optional[str] = None
@@ -307,6 +311,11 @@ class Brain:
                 })
                 self.memory.mark_memory_used(memories["ids"])
 
+        # User profile (persistent model of who the user is)
+        profile_block = self.user_profile.as_system_block()
+        if profile_block:
+            messages.append({"role": "system", "content": profile_block})
+
         # Long-term facts
         facts = self.memory.list_facts(limit=self.settings.memory_long_term_facts)
         if facts:
@@ -428,18 +437,21 @@ class Brain:
             name = t.split("me llamo", 1)[-1].strip(" .:;!")
             if name:
                 self.memory.upsert_fact("name", name)
+                self.user_profile.set_name(name)
                 return
         if "mi nombre es" in low:
             idx = low.find("mi nombre es")
             name = t[idx + len("mi nombre es"):].strip(" .:;!")
             if name:
                 self.memory.upsert_fact("name", name)
+                self.user_profile.set_name(name)
                 return
         if "me dicen" in low:
             idx = low.find("me dicen")
             name = t[idx + len("me dicen"):].strip(" .:;!")
             if name:
                 self.memory.upsert_fact("name", name)
+                self.user_profile.set_name(name)
                 return
         if low.startswith("recuerda que "):
             rest = t[len("recuerda que "):].strip()
@@ -481,3 +493,20 @@ class Brain:
         self.reasoner.summarize(n)
         n_mem = int(self.settings.memory_extract_every_n_turns or 0)
         self.reasoner.extract_memories(user_id=user_id, n=n_mem)
+        # Update persistent user profile from recent conversation
+        try:
+            recent = self.memory.recent(limit=12)
+            turns = [{"role": it.role, "content": it.content} for it in recent if it.role != "system"]
+            if turns:
+                changed = self.user_profile.update_from_conversation(
+                    turns,
+                    chat_fn=lambda msgs: self.reasoner._chat(
+                        msgs,
+                        model=self.settings.llm_model_fast,
+                        temperature=0.1,
+                    ),
+                )
+                if changed and os.getenv("YUI_DEBUG_MEMORY", "0") not in {"0", "false"}:
+                    print(f"[YUI] Perfil de usuario actualizado: {self.user_profile.name}")
+        except Exception:
+            pass
