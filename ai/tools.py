@@ -193,7 +193,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                 "type": "object",
                 "properties": {
                     "url": {"type": "string", "description": "URL completa a abrir."},
-                    "headless": {"type": "boolean", "description": "true = sin ventana visible (por defecto), false = muestra el navegador."},
+                    "headless": {"type": "boolean", "description": "false = muestra el navegador visible (por defecto), true = sin ventana."},
                 },
                 "required": ["url"],
             },

@@ -57,12 +57,6 @@ def _call(fn: Callable, *args, **kwargs) -> Any:
     box: list = []
     _cmd_q.put((fn, args, kwargs, box))
     # wait for result — use a simple Event
-    done = threading.Event()
-
-    def _waiter():
-        _cmd_q.join()
-        done.set()
-
     # Poll box directly (queue.join() would block all callers)
     import time
     timeout = 35.0
@@ -205,7 +199,7 @@ def _op_close() -> str:
 
 # ── Public API (called from any thread) ──────────────────────────────────────
 
-def browser_open(url: str, headless: bool = True, wait_until: str = "domcontentloaded") -> str:
+def browser_open(url: str, headless: bool = False, wait_until: str = "domcontentloaded") -> str:
     return _call(_op_open, url, headless, wait_until)
 
 def browser_click(selector: str, timeout_ms: int = 8000) -> str:
