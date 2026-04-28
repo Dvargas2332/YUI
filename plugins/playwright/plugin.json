@@ -1,0 +1,8 @@
+{
+  "id": "playwright",
+  "name": "Playwright Browser",
+  "version": "1.0.0",
+  "description": "Automatización de navegador con Playwright: abrir páginas, hacer clic, llenar formularios, tomar screenshots y detectar tecnologías con Wappalyzer.",
+  "entrypoint": "plugin.py",
+  "enabled": true
+}

@@ -183,10 +183,202 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             },
         },
     },
+    # ── Playwright browser tools ──────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_open",
+            "description": "Abre una URL en el navegador automatizado. Úsalo para navegar a páginas web, formularios, paneles de login, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL completa a abrir."},
+                    "headless": {"type": "boolean", "description": "true = sin ventana visible (por defecto), false = muestra el navegador."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_click",
+            "description": "Hace clic en un elemento del navegador usando un selector CSS o XPath.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "Selector CSS o XPath del elemento a clickear. Ej: '#submit-btn', 'button[type=submit]', 'text=Aceptar'."},
+                },
+                "required": ["selector"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_fill",
+            "description": "Llena un campo de formulario (input, textarea) con un valor. Borra el contenido previo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "Selector CSS del campo. Ej: '#email', 'input[name=password]'."},
+                    "value": {"type": "string", "description": "Valor a escribir en el campo."},
+                },
+                "required": ["selector", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_type",
+            "description": "Escribe texto en un elemento caracter por caracter (simula teclado humano). Útil cuando browser_fill no funciona.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "Selector CSS del elemento."},
+                    "text": {"type": "string", "description": "Texto a escribir."},
+                },
+                "required": ["selector", "text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_get_text",
+            "description": "Obtiene el texto visible de un elemento o de toda la página. Úsalo para leer contenido, mensajes de error, resultados.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "Selector CSS del elemento (por defecto 'body' = toda la página)."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_screenshot",
+            "description": "Toma una captura de pantalla del estado actual del navegador.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "save_path": {"type": "string", "description": "Ruta donde guardar el PNG (opcional). Si no se da, devuelve base64."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_wait",
+            "description": "Espera a que un elemento aparezca o sea visible en la página antes de continuar.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "Selector CSS del elemento a esperar."},
+                    "state": {"type": "string", "description": "'visible' (por defecto), 'attached', 'hidden', 'detached'."},
+                },
+                "required": ["selector"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_eval",
+            "description": "Ejecuta JavaScript en la página del navegador y devuelve el resultado.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "script": {"type": "string", "description": "Código JavaScript a ejecutar en el contexto de la página. Ej: 'document.title' o 'document.cookie'."},
+                },
+                "required": ["script"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_url",
+            "description": "Devuelve la URL actual del navegador.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_select",
+            "description": "Selecciona una opción en un elemento <select> (dropdown).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selector": {"type": "string", "description": "Selector CSS del <select>."},
+                    "value": {"type": "string", "description": "Valor de la opción a seleccionar."},
+                },
+                "required": ["selector", "value"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_press",
+            "description": "Presiona una tecla del teclado. Ej: 'Enter', 'Tab', 'Escape', 'ArrowDown'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "Nombre de la tecla (formato Playwright). Ej: 'Enter', 'Tab', 'F5'."},
+                    "selector": {"type": "string", "description": "Selector del elemento donde presionar (opcional, si no se da es global)."},
+                },
+                "required": ["key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_new_tab",
+            "description": "Abre una nueva pestaña en el navegador, opcionalmente con una URL.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL a abrir en la nueva pestaña (opcional)."},
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "browser_close",
+            "description": "Cierra el navegador y libera todos los recursos. Úsalo cuando termines de automatizar.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    # ── Wappalyzer ────────────────────────────────────────────────────────────
+    {
+        "type": "function",
+        "function": {
+            "name": "wappalyzer_analyze",
+            "description": "Analiza una URL y detecta las tecnologías usadas: CMS, frameworks, servidores, CDNs, analytics, etc. Muy útil para reconocimiento web.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL completa a analizar. Ej: 'https://example.com'."},
+                },
+                "required": ["url"],
+            },
+        },
+    },
 ]
 
 # Tools that require confirmation before execution
-DESTRUCTIVE_TOOLS = {"write_file", "create_folder", "run_command"}
+DESTRUCTIVE_TOOLS = {"write_file", "create_folder", "run_command", "browser_eval"}
 
 
 def execute_tool(
@@ -221,6 +413,69 @@ def execute_tool(
         return _fetch_multiple(args)
     if name == "fact_check":
         return _fact_check(args)
+    # ── Playwright / Wappalyzer ───────────────────────────────────────────────
+    if name in {
+        "browser_open", "browser_click", "browser_fill", "browser_type",
+        "browser_get_text", "browser_get_html", "browser_screenshot",
+        "browser_wait", "browser_eval", "browser_url", "browser_select",
+        "browser_press", "browser_new_tab", "browser_close",
+        "wappalyzer_analyze",
+    }:
+        return _dispatch_browser(name, args, confirm_fn=confirm_fn)
+    return f"[error] Herramienta desconocida: {name}"
+
+
+def _dispatch_browser(
+    name: str,
+    args: Dict[str, Any],
+    *,
+    confirm_fn: Optional[Callable[[str], bool]],
+) -> str:
+    try:
+        from plugins.playwright.browser import (
+            browser_open, browser_click, browser_fill, browser_type,
+            browser_get_text, browser_get_html, browser_screenshot,
+            browser_wait, browser_eval, browser_url, browser_select,
+            browser_press, browser_new_tab, browser_close,
+            wappalyzer_analyze,
+        )
+    except ImportError as e:
+        return f"[error] Plugin Playwright no disponible: {e}"
+
+    if name == "browser_open":
+        if confirm_fn and not confirm_fn(f"abrir navegador en: {args.get('url')}"):
+            return "[cancelado]"
+        return browser_open(args["url"], headless=args.get("headless", True))
+    if name == "browser_click":
+        return browser_click(args["selector"])
+    if name == "browser_fill":
+        return browser_fill(args["selector"], args["value"])
+    if name == "browser_type":
+        return browser_type(args["selector"], args["text"])
+    if name == "browser_get_text":
+        return browser_get_text(args.get("selector", "body"))
+    if name == "browser_get_html":
+        return browser_get_html(args.get("selector", "html"), args.get("max_chars", 6000))
+    if name == "browser_screenshot":
+        return browser_screenshot(args.get("save_path"))
+    if name == "browser_wait":
+        return browser_wait(args["selector"], args.get("state", "visible"))
+    if name == "browser_eval":
+        if confirm_fn and not confirm_fn(f"ejecutar JS: {args.get('script','')[:80]}"):
+            return "[cancelado]"
+        return browser_eval(args["script"])
+    if name == "browser_url":
+        return browser_url()
+    if name == "browser_select":
+        return browser_select(args["selector"], args["value"])
+    if name == "browser_press":
+        return browser_press(args["key"], args.get("selector"))
+    if name == "browser_new_tab":
+        return browser_new_tab(args.get("url"))
+    if name == "browser_close":
+        return browser_close()
+    if name == "wappalyzer_analyze":
+        return wappalyzer_analyze(args["url"])
     return f"[error] Herramienta desconocida: {name}"
 
 
