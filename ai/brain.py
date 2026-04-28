@@ -25,6 +25,7 @@ from config.settings import Settings
 from memory.store import MemoryStore
 from memory.user_profile import UserProfile
 from memory.agenda import AgendaManager
+from ai.modules.planner_auto import AutoPlanner
 from ai.modules.context import VisualContext
 from ai.modules.persona import StylePolicy, MacroPolicy, TeachingModePolicy
 from ai.modules.memory import SessionPolicy
@@ -138,7 +139,15 @@ class Brain:
             _max_tokens = 0
         self.reasoner.last_mode = str(llm_mode or "fast")
 
-        # 6) Build message context
+        # 6) AutoPlanner — multi-step autonomous execution
+        goal, is_plan = _extract_plan_goal(user_text)
+        if is_plan:
+            self.memory.add("user", user_text)
+            response = self._run_auto_planner(goal, llm_model=str(llm_model), llm_temperature=float(llm_temperature), workspace_root=workspace_root)
+            self._store_exchange_assistant(response)
+            return response
+
+        # Build message context
         messages = self._build_messages(user_text, visual=visual, screen_context=screen_context, workspace_root=workspace_root)
         self.memory.add("user", user_text)
 
@@ -266,6 +275,46 @@ class Brain:
             self.memory.add("assistant", response)
         except Exception:
             pass
+
+    def _store_exchange_assistant(self, response: str) -> None:
+        try:
+            self.memory.add("assistant", response)
+        except Exception:
+            pass
+
+    def _run_auto_planner(
+        self,
+        goal: str,
+        *,
+        llm_model: str,
+        llm_temperature: float,
+        workspace_root: str,
+    ) -> str:
+        def chat_fn(messages):
+            return self.reasoner._chat(messages, model=llm_model, temperature=0.2)
+
+        def execute_fn(instruction: str) -> str:
+            msgs = self._build_messages(
+                instruction,
+                visual=VisualContext(),
+                screen_context=None,
+                workspace_root=workspace_root,
+            )
+            return self.reasoner.call(
+                msgs,
+                model=llm_model,
+                temperature=llm_temperature,
+                workspace_root=workspace_root,
+                tools_enabled=True,
+            )
+
+        planner = AutoPlanner(
+            chat_fn=chat_fn,
+            execute_fn=execute_fn,
+            step_fn=self.reasoner.step_fn,
+            model_fast=self.settings.llm_model_fast,
+        )
+        return planner.run(goal)
 
     def _build_messages(
         self,
@@ -523,3 +572,29 @@ class Brain:
                     print(f"[YUI] Perfil de usuario actualizado: {self.user_profile.name}")
         except Exception:
             pass
+
+
+# ── Module-level helpers ──────────────────────────────────────────────────────
+
+_PLAN_PREFIXES = (
+    "/plan ",
+    "planifica y ejecuta ",
+    "planifica y ejecuta:",
+    "de forma autónoma ",
+    "de forma autonoma ",
+    "ejecuta autónomamente ",
+    "ejecuta autonomamente ",
+    "tarea autónoma:",
+    "tarea autonoma:",
+)
+
+
+def _extract_plan_goal(text: str) -> tuple[str, bool]:
+    """Returns (goal, True) if text is an AutoPlanner request, else (text, False)."""
+    t = text.strip()
+    tl = t.lower()
+    for prefix in _PLAN_PREFIXES:
+        if tl.startswith(prefix):
+            goal = t[len(prefix):].strip()
+            return goal or t, True
+    return t, False
