@@ -1290,6 +1290,45 @@ class YUI:
                     pass
             return f"Entorno: {summarize_profile(prof)}. tier={self._tuning_tier}."
 
+        # ── Auto-update ───────────────────────────────────────────────────────
+        if any(k in low for k in [
+            "hay actualizaciones", "hay actualización", "hay update",
+            "busca actualizaciones", "buscar actualizaciones",
+            "check update", "check updates",
+        ]):
+            try:
+                from utils.updater import check_updates
+                info = check_updates()
+                if not info["available"]:
+                    return info["summary"]
+                n = info["commits"]
+                log = info["summary"]
+                return (
+                    f"Hay {n} actualización{'es' if n != 1 else ''} disponible{'s' if n != 1 else ''}:\n"
+                    f"{log}\n\nDi **actualiza yui** para instalarlas."
+                )
+            except Exception as e:
+                return f"No pude verificar actualizaciones: {e}"
+
+        if any(k in low for k in [
+            "actualiza yui", "actualizar yui", "update yui",
+            "instala actualización", "instala actualizaciones",
+            "instala update", "instala updates",
+        ]):
+            try:
+                from utils.updater import check_updates, apply_update
+                info = check_updates()
+                if not info["available"]:
+                    return "YUI ya está en la última versión, no hay nada que actualizar."
+                msgs: list[str] = []
+                result = apply_update(on_progress=lambda m: msgs.append(m))
+                detail = "\n".join(msgs)
+                if result["ok"]:
+                    return f"✓ {result['message']}\n\nDetalle:\n{detail}"
+                return f"✗ {result['message']}\n\nDetalle:\n{detail}"
+            except Exception as e:
+                return f"Error durante la actualización: {e}"
+
         # System audit (read-only, via PowerShell).
         if any(
             k in low
