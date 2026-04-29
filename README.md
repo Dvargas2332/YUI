@@ -1,5 +1,10 @@
 # YUI — Agente de IA Generativa Local
 
+![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![License](https://img.shields.io/badge/license-Personal-red)
+![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+
+
 **YUI** es un agente de inteligencia artificial generativa personal, diseñado para ejecutarse completamente en local. A diferencia de los sistemas multi-agente clásicos, YUI opera como **un único agente con un cerebro unificado** que sabe, de forma autónoma, qué partes de sí mismo deben activarse ante cada situación — voz, visión, memoria, escritorio, seguridad — reaccionando de manera coordinada como si fueran múltiples especialistas, pero desde una sola mente coherente.
 
 > Copyright © 2026 Diego Alonso Vargas Almengor. Todos los derechos reservados.
