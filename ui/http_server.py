@@ -73,6 +73,13 @@ class UiHttpServer:
             def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
                 return
 
+            def do_OPTIONS(self) -> None:  # noqa: N802
+                self.send_response(200)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Language")
+                self.end_headers()
+
             def do_GET(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
                 if parsed.path == "/api/bootstrap":
@@ -90,6 +97,28 @@ class UiHttpServer:
 
             def do_POST(self) -> None:  # noqa: N802
                 parsed = urlparse(self.path)
+
+                # ── Voice: recibe WebM/OGG del browser, transcribe con Whisper → comando ──
+                if parsed.path == "/api/voice":
+                    length = int(self.headers.get("Content-Length", "0") or "0")
+                    if length == 0:
+                        self._send_json({"error": "no_audio"}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    audio_data = self.rfile.read(length)
+                    language = (self.headers.get("X-Language") or "es").strip()
+                    try:
+                        text = _transcribe_browser_audio(audio_data, language=language)
+                    except Exception as e:
+                        self._send_json({"error": str(e)}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
+                        return
+                    if not text:
+                        self._send_json({"ok": False, "text": ""})
+                        return
+                    # Dispatch as a normal command
+                    accepted = on_command(text, "")
+                    self._send_json({"ok": bool(accepted), "text": text})
+                    return
+
                 allowed = {"/api/command", "/api/toggle", "/api/config", "/api/clear", "/api/compact", "/api/mode", "/api/plugins", "/api/shutdown"}
                 if parsed.path not in allowed:
                     self._send_json({"error": "not_found"}, status=HTTPStatus.NOT_FOUND)
@@ -207,3 +236,41 @@ class UiHttpServer:
                 self.wfile.write(body)
 
         return Handler
+
+
+def _transcribe_browser_audio(audio_data: bytes, *, language: str = "es") -> Optional[str]:
+    """
+    Convierte audio WebM/OGG/WAV del browser a PCM int16 y transcribe con Whisper.
+    Requiere: pip install faster-whisper pydub
+    ffmpeg debe estar en PATH para que pydub convierta WebM→PCM.
+    Si Whisper no está disponible, intenta con SpeechRecognition + Google como fallback.
+    """
+    # Convertir WebM/OGG → PCM int16 16kHz con pydub
+    try:
+        from pydub import AudioSegment  # type: ignore
+        import io as _io
+        seg = AudioSegment.from_file(_io.BytesIO(audio_data))
+        seg = seg.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+        pcm_bytes = seg.raw_data
+    except Exception:
+        # Sin pydub: asumir que el browser envió PCM crudo (poco probable pero seguro)
+        pcm_bytes = audio_data
+
+    # Intentar Whisper primero
+    try:
+        from yui_io.stt import transcribe_audio_bytes
+        result = transcribe_audio_bytes(pcm_bytes, language=language)
+        if result:
+            return result
+    except Exception:
+        pass
+
+    # Fallback: SpeechRecognition + Google
+    try:
+        import speech_recognition as sr
+        audio_sr = sr.AudioData(pcm_bytes, 16000, 2)
+        recognizer = sr.Recognizer()
+        lang_sr = language if "-" in language else f"{language}-ES"
+        return (recognizer.recognize_google(audio_sr, language=lang_sr) or "").strip() or None
+    except Exception:
+        return None

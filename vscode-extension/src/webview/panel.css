@@ -892,3 +892,58 @@ code.md-code {
   color: var(--accent2);
   font-weight: 600;
 }
+
+/* ── VOZ ─────────────────────────────────────────────────── */
+#mic-btn {
+  flex-shrink: 0;
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border);
+  background: var(--bg2);
+  color: var(--text2);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+#mic-btn:hover { background: var(--bg3); color: var(--accent); border-color: var(--accent); }
+#mic-btn.recording {
+  background: #e74c3c; border-color: #e74c3c; color: #fff;
+  animation: mic-pulse-vs 1.2s ease-in-out infinite;
+}
+#mic-btn.continuous { background: var(--accent); border-color: var(--accent); color: #fff; }
+@keyframes mic-pulse-vs {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(231,76,60,0.25); }
+  50%       { box-shadow: 0 0 0 6px rgba(231,76,60,0.10); }
+}
+
+.voice-bar {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 10px;
+  border-top: 1px solid var(--border);
+  font-size: 11px; color: var(--text2);
+}
+.voice-bar.hidden { display: none; }
+.voice-bar.continuous .voice-wave span { background: var(--accent); }
+
+.voice-wave { display: flex; align-items: center; gap: 2px; height: 18px; }
+.voice-wave span {
+  display: block; width: 2px; border-radius: 2px;
+  background: #e74c3c;
+  animation: wave-vs 0.9s ease-in-out infinite;
+}
+.voice-wave span:nth-child(1) { animation-delay: 0.0s;  height: 4px; }
+.voice-wave span:nth-child(2) { animation-delay: 0.15s; height: 9px; }
+.voice-wave span:nth-child(3) { animation-delay: 0.3s;  height: 14px; }
+.voice-wave span:nth-child(4) { animation-delay: 0.15s; height: 9px; }
+.voice-wave span:nth-child(5) { animation-delay: 0.0s;  height: 4px; }
+@keyframes wave-vs {
+  0%, 100% { transform: scaleY(0.4); opacity: 0.5; }
+  50%       { transform: scaleY(1.0); opacity: 1.0; }
+}
+#voice-status-text { flex: 1; }
+#voice-stop-btn {
+  font-size: 10px; padding: 2px 7px;
+  border: 1px solid var(--border); border-radius: 4px;
+  background: transparent; color: var(--text2); cursor: pointer;
+}
+#voice-stop-btn:hover { background: #e74c3c; border-color: #e74c3c; color: #fff; }

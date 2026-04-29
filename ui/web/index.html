@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YUI — Agente</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app">
+
+      <!-- SIDEBAR -->
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-avatar">
+            <div class="avatar-ring" id="avatar-ring"></div>
+            <span class="avatar-letter">Y</span>
+          </div>
+          <div class="brand-info">
+            <h1>YUI</h1>
+            <span class="status-dot" id="status-dot"></span>
+            <span id="agent-state" class="brand-status">iniciando</span>
+          </div>
+        </div>
+
+        <nav class="nav">
+          <button class="nav-item active" data-tab="chat">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+            Chat
+          </button>
+          <button class="nav-item" data-tab="config">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
+            APIs & Modelo
+          </button>
+          <button class="nav-item" data-tab="prompts">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+            Prompts & Reglas
+          </button>
+          <button class="nav-item" data-tab="tasks">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+            Tareas
+          </button>
+          <button class="nav-item" data-tab="system">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+            Sistema
+          </button>
+        </nav>
+
+        <div class="sidebar-footer">
+          <div class="ws-indicator">
+            <span class="dot" id="ws-dot"></span>
+            <span id="ws-state">desconectado</span>
+          </div>
+          <div class="sidebar-meta">
+            <span id="mode-pill" class="badge">Text</span>
+            <span id="llm-model-badge" class="badge muted">—</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- MAIN AREA -->
+      <main class="main">
+
+        <!-- TAB: CHAT -->
+        <section class="tab active" id="tab-chat">
+          <div class="tab-header">
+            <div>
+              <h2>Chat</h2>
+              <p class="tab-desc">Habla con YUI directamente desde el navegador.</p>
+            </div>
+            <div class="header-actions">
+              <button class="btn-ghost" id="clear-chat">Limpiar</button>
+            </div>
+          </div>
+
+          <!-- CONFIRM BANNER -->
+          <div class="confirm-banner hidden" id="confirm-banner">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            <div class="confirm-banner-text">
+              <strong id="confirm-desc">Acción pendiente</strong>
+              <span id="confirm-timeout-label"></span>
+            </div>
+            <form class="confirm-inline" id="confirm-form">
+              <input id="confirm-code" type="text" placeholder="Código" autocomplete="off" />
+              <button type="submit" class="btn-accent-sm">Confirmar</button>
+              <button type="button" id="cancel-confirm" class="btn-ghost-sm">Cancelar</button>
+            </form>
+          </div>
+
+          <div class="chat-area" id="chat-messages"></div>
+
+          <div class="chat-composer">
+            <div class="suggestions-row" id="suggestions-row">
+              <button type="button" class="chip" data-command="mis comandos">mis comandos</button>
+              <button type="button" class="chip" data-command="lista tareas">lista tareas</button>
+              <button type="button" class="chip" data-command="auditoria seguridad">auditoria seguridad</button>
+              <button type="button" class="chip" data-command="estado del sistema">estado del sistema</button>
+            </div>
+            <form class="composer-form" id="command-form">
+              <textarea id="command-input" rows="1" placeholder="Escribe un mensaje para YUI…" autofocus></textarea>
+              <!-- Botón micrófono: un clic = grabar y enviar; mantener = habla continua -->
+              <button type="button" class="mic-btn" id="mic-btn" aria-label="Grabar voz" title="Clic: grabar mensaje | Mantener 1s: habla continua">
+                <svg id="mic-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="2" width="6" height="12" rx="3"/><path d="M19 10a7 7 0 0 1-14 0"/><line x1="12" y1="19" x2="12" y2="22"/><line x1="8" y1="22" x2="16" y2="22"/></svg>
+              </button>
+              <button type="submit" class="send-btn" id="send-button" aria-label="Enviar mensaje">
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+              </button>
+            </form>
+            <!-- Barra de estado de voz (visible solo cuando mic está activo) -->
+            <div class="voice-bar hidden" id="voice-bar">
+              <div class="voice-bar-inner">
+                <div class="voice-wave" id="voice-wave">
+                  <span></span><span></span><span></span><span></span><span></span>
+                </div>
+                <span id="voice-status-text">Escuchando…</span>
+                <button type="button" class="voice-stop-btn" id="voice-stop-btn">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+                  Detener
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB: CONFIG APIs -->
+        <section class="tab" id="tab-config">
+          <div class="tab-header">
+            <div>
+              <h2>APIs y Modelo</h2>
+              <p class="tab-desc">Configura el proveedor LLM, claves de API y parámetros de generación.</p>
+            </div>
+            <button class="btn-accent" id="save-config-btn">Guardar cambios</button>
+          </div>
+
+          <div class="config-grid">
+            <div class="config-card">
+              <h3>Proveedor LLM</h3>
+              <p class="card-desc">URL base del endpoint OpenAI-compatible (DeepSeek, OpenAI, Ollama, LM Studio…).</p>
+              <div class="field-group">
+                <label for="cfg-base-url">Base URL</label>
+                <input id="cfg-base-url" type="text" placeholder="https://api.deepseek.com/v1" />
+              </div>
+              <div class="field-group">
+                <label for="cfg-api-key">API Key</label>
+                <div class="input-with-action">
+                  <input id="cfg-api-key" type="password" placeholder="sk-…" autocomplete="off" />
+                  <button type="button" class="btn-ghost-sm" id="toggle-key-visibility">Mostrar</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="config-card">
+              <h3>Modelos</h3>
+              <p class="card-desc">YUI usa dos modelos: rápido para respuestas cortas, profundo para razonamiento.</p>
+              <div class="field-group">
+                <label for="cfg-model-fast">Modelo rápido</label>
+                <input id="cfg-model-fast" type="text" placeholder="deepseek-chat" />
+              </div>
+              <div class="field-group">
+                <label for="cfg-model-deep">Modelo profundo</label>
+                <input id="cfg-model-deep" type="text" placeholder="deepseek-reasoner" />
+              </div>
+              <div class="field-group">
+                <label for="cfg-llm-mode">Modo forzado</label>
+                <select id="cfg-llm-mode">
+                  <option value="">Auto (inteligente)</option>
+                  <option value="fast">Siempre rápido</option>
+                  <option value="deep">Siempre profundo</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="config-card">
+              <h3>Parámetros de generación</h3>
+              <p class="card-desc">Controla la creatividad y longitud de las respuestas.</p>
+              <div class="field-group">
+                <label for="cfg-temp-fast">Temperatura rápida <span class="label-val" id="temp-fast-val">0.4</span></label>
+                <input id="cfg-temp-fast" type="range" min="0" max="2" step="0.05" value="0.4" />
+              </div>
+              <div class="field-group">
+                <label for="cfg-temp-deep">Temperatura profunda <span class="label-val" id="temp-deep-val">0.2</span></label>
+                <input id="cfg-temp-deep" type="range" min="0" max="2" step="0.05" value="0.2" />
+              </div>
+              <div class="field-group">
+                <label for="cfg-max-tokens">Tokens máximos</label>
+                <input id="cfg-max-tokens" type="number" min="64" max="4096" step="64" placeholder="240" />
+              </div>
+            </div>
+
+            <div class="config-card">
+              <h3>Idioma y voz</h3>
+              <p class="card-desc">Ajusta el idioma del STT y la voz de síntesis.</p>
+              <div class="field-group">
+                <label for="cfg-stt-lang">Idioma STT</label>
+                <input id="cfg-stt-lang" type="text" placeholder="es-CR" />
+              </div>
+              <div class="field-group">
+                <label for="cfg-tts-engine">Motor TTS</label>
+                <select id="cfg-tts-engine">
+                  <option value="edge">Edge TTS (Microsoft)</option>
+                  <option value="pyttsx3">pyttsx3 (local)</option>
+                  <option value="gtts">gTTS (Google)</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label for="cfg-wake-word">Wake word</label>
+                <input id="cfg-wake-word" type="text" placeholder="yui" />
+              </div>
+            </div>
+          </div>
+
+          <div class="save-result hidden" id="save-result"></div>
+        </section>
+
+        <!-- TAB: PROMPTS & REGLAS -->
+        <section class="tab" id="tab-prompts">
+          <div class="tab-header">
+            <div>
+              <h2>Prompts y Reglas</h2>
+              <p class="tab-desc">Define la personalidad, estilo de respuesta y restricciones del agente.</p>
+            </div>
+            <button class="btn-accent" id="save-prompt-btn">Guardar prompt</button>
+          </div>
+
+          <div class="config-grid">
+            <div class="config-card span-2">
+              <h3>System Prompt</h3>
+              <p class="card-desc">Define quién es YUI. Edita directamente y guarda para aplicar en la próxima sesión.</p>
+              <div class="field-group">
+                <textarea id="cfg-system-prompt" rows="14" placeholder="Eres YUI, una asistente…"></textarea>
+              </div>
+            </div>
+
+            <div class="config-card">
+              <h3>Reglas de estilo</h3>
+              <div class="field-group">
+                <label for="style-max-sentences">Máximo de frases por respuesta</label>
+                <input id="style-max-sentences" type="number" min="0" max="20" placeholder="3" />
+              </div>
+              <div class="field-group">
+                <label for="style-ban-phrase">Frase a prohibir</label>
+                <div class="input-with-action">
+                  <input id="style-ban-phrase" type="text" placeholder="no digas 'por supuesto'" />
+                  <button type="button" class="btn-ghost-sm" id="add-ban-phrase">Agregar</button>
+                </div>
+              </div>
+              <div class="banned-list" id="banned-list"></div>
+              <div class="field-group field-group--mt">
+                <button type="button" class="btn-secondary" id="apply-style-btn">Aplicar reglas</button>
+                <button type="button" class="btn-ghost" id="reset-style">Resetear estilo</button>
+              </div>
+            </div>
+
+            <div class="config-card">
+              <h3>Macros</h3>
+              <p class="card-desc">Atajos de voz: al decir el gatillo, YUI ejecuta la acción.</p>
+              <div class="field-group">
+                <label for="macro-trigger">Frase gatillo</label>
+                <input id="macro-trigger" type="text" placeholder="abre youtube" />
+              </div>
+              <div class="field-group">
+                <label for="macro-action">Acción</label>
+                <input id="macro-action" type="text" placeholder="url https://youtube.com" />
+              </div>
+              <button type="button" class="btn-secondary" id="save-macro-btn">Guardar macro</button>
+              <div class="macro-list" id="macro-list"></div>
+            </div>
+
+            <div class="config-card span-2">
+              <h3>Permisos del agente</h3>
+              <p class="card-desc">Activa o desactiva capacidades del agente en tiempo real.</p>
+              <div class="toggle-grid" id="toggle-grid"></div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB: TAREAS -->
+        <section class="tab" id="tab-tasks">
+          <div class="tab-header">
+            <div>
+              <h2>Tareas automatizadas</h2>
+              <p class="tab-desc">Crea y gestiona secuencias de acciones que YUI puede ejecutar.</p>
+            </div>
+          </div>
+
+          <div class="config-grid">
+            <div class="config-card">
+              <h3>Nueva tarea</h3>
+              <p class="card-desc">Define pasos (uno por línea). YUI los ejecutará en orden con confirmación.</p>
+              <div class="field-group">
+                <label for="quick-task-name">Nombre de la tarea</label>
+                <input id="quick-task-name" type="text" placeholder="abrir-bloc" />
+              </div>
+              <div class="field-group">
+                <label for="quick-task-steps">Pasos</label>
+                <textarea id="quick-task-steps" rows="6" placeholder="abre notepad&#10;espera 1&#10;escribe hola mundo&#10;tecla enter"></textarea>
+              </div>
+              <button type="button" class="btn-accent" id="save-task-btn">Crear tarea</button>
+            </div>
+
+            <div class="config-card">
+              <h3>Tareas guardadas</h3>
+              <div class="task-list" id="task-list"></div>
+            </div>
+
+            <div class="config-card span-2">
+              <h3>Plugins y extensiones</h3>
+              <div class="plugins-grid">
+                <div>
+                  <h4>Plugins</h4>
+                  <div id="plugin-list" class="catalog-list"></div>
+                </div>
+                <div>
+                  <h4>Extensiones</h4>
+                  <div id="extension-list" class="catalog-list"></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- TAB: SISTEMA -->
+        <section class="tab" id="tab-system">
+          <div class="tab-header">
+            <div>
+              <h2>Sistema</h2>
+              <p class="tab-desc">Estado del agente, permisos de hardware y actividad reciente.</p>
+            </div>
+            <div style="display:flex;gap:.5rem">
+              <button class="btn-ghost" id="refresh-state">Actualizar</button>
+              <button class="btn-danger" id="shutdown-btn">Apagar YUI</button>
+            </div>
+          </div>
+
+          <div class="config-grid">
+            <div class="config-card">
+              <h3>Estado del agente</h3>
+              <div class="stat-grid" id="mode-facts"></div>
+            </div>
+
+            <div class="config-card">
+              <h3>Configuración LLM</h3>
+              <div class="kv-list" id="prompts-panel"></div>
+            </div>
+
+            <div class="config-card">
+              <h3>Permisos hardware</h3>
+              <div class="kv-list" id="permissions-panel"></div>
+            </div>
+
+            <div class="config-card">
+              <h3>Log de actividad</h3>
+              <div class="activity-log" id="activity-log"></div>
+            </div>
+          </div>
+        </section>
+
+      </main>
+    </div>
+
+    <script src="./app.js"></script>
+  </body>
+</html>

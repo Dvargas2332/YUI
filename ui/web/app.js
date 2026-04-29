@@ -765,3 +765,165 @@ qs('#shutdown-btn').addEventListener('click', async () => {
 
 // ---- BOOT ----
 loadBootstrap().then(() => connectWs());
+
+// ══════════════════════════════════════════════════════════
+// VOZ — grabación, transcripción y habla continua
+// ══════════════════════════════════════════════════════════
+const VoiceUI = (() => {
+  let mediaRecorder = null;
+  let audioChunks = [];
+  let stream = null;
+  let mode = 'idle';          // 'idle' | 'recording' | 'continuous'
+  let continuousLoop = false;
+  let holdTimer = null;
+
+  const micBtn   = qs('#mic-btn');
+  const voiceBar = qs('#voice-bar');
+  const statusTx = qs('#voice-status-text');
+  const stopBtn  = qs('#voice-stop-btn');
+
+  function setStatus(text, barMode) {
+    if (statusTx) statusTx.textContent = text;
+    if (voiceBar) {
+      voiceBar.classList.remove('hidden', 'continuous');
+      if (barMode === 'hidden') { voiceBar.classList.add('hidden'); return; }
+      if (barMode === 'continuous') voiceBar.classList.add('continuous');
+    }
+  }
+
+  function setMicState(s) {
+    mode = s;
+    micBtn.classList.remove('recording', 'continuous');
+    if (s === 'recording')  micBtn.classList.add('recording');
+    if (s === 'continuous') micBtn.classList.add('continuous');
+  }
+
+  async function getStream() {
+    if (stream && stream.active) return stream;
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    return stream;
+  }
+
+  async function startRecording() {
+    try {
+      const s = await getStream();
+      audioChunks = [];
+      mediaRecorder = new MediaRecorder(s);
+      mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+      mediaRecorder.start();
+      setMicState('recording');
+      setStatus('Escuchando…', 'normal');
+    } catch (err) {
+      console.error('[YUI voz] No se pudo acceder al micrófono:', err);
+      setStatus('Micrófono no disponible', 'hidden');
+    }
+  }
+
+  async function stopAndSend() {
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+    return new Promise(resolve => {
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(audioChunks, { type: 'audio/webm' });
+        audioChunks = [];
+        setStatus('Transcribiendo…', 'normal');
+        try {
+          const lang = (S.bootstrap?.settings?.stt_language || 'es').split('-')[0];
+          const res = await fetch('/api/voice', {
+            method: 'POST',
+            headers: { 'Content-Type': 'audio/webm', 'X-Language': lang },
+            body: blob,
+          });
+          const data = await res.json();
+          if (data.text) {
+            // Mostrar el texto transcrito en el input brevemente antes de enviar
+            const inp = qs('#command-input');
+            if (inp) inp.value = data.text;
+            await sendCommand(data.text);
+            if (inp) inp.value = '';
+          } else {
+            setStatus('No entendí. Intenta de nuevo.', 'normal');
+          }
+        } catch (e) {
+          console.error('[YUI voz] Error enviando audio:', e);
+          setStatus('Error de red', 'normal');
+        }
+        resolve();
+      };
+      mediaRecorder.stop();
+    });
+  }
+
+  // ── Modo clic simple: grabar y enviar ────────────────────
+  async function toggleRecording() {
+    if (mode === 'recording') {
+      await stopAndSend();
+      setMicState('idle');
+      setStatus('', 'hidden');
+    } else if (mode === 'idle') {
+      await startRecording();
+    }
+  }
+
+  // ── Modo habla continua: escucha → envía → escucha → … ──
+  async function startContinuous() {
+    continuousLoop = true;
+    setMicState('continuous');
+    setStatus('Habla continua activa — escuchando…', 'continuous');
+    while (continuousLoop) {
+      await startRecording();
+      // Graba hasta que haya 2.5s de silencio (MediaRecorder no tiene VAD nativo;
+      // usamos un timeout fijo de 6s como aproximación razonable).
+      await new Promise(r => setTimeout(r, 6000));
+      if (!continuousLoop) break;
+      setMicState('continuous');   // mantener el estado visual
+      await stopAndSend();
+      if (!continuousLoop) break;
+      setStatus('Habla continua — escuchando…', 'continuous');
+      await new Promise(r => setTimeout(r, 400));  // pequeña pausa entre turnos
+    }
+    stopContinuous();
+  }
+
+  function stopContinuous() {
+    continuousLoop = false;
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    setMicState('idle');
+    setStatus('', 'hidden');
+  }
+
+  // ── Eventos del botón ─────────────────────────────────────
+  micBtn.addEventListener('mousedown', () => {
+    // Detectar mantener pulsado (>700ms) → habla continua
+    holdTimer = setTimeout(() => {
+      holdTimer = null;
+      if (mode === 'continuous') { stopContinuous(); return; }
+      if (mode === 'recording') { stopAndSend().then(() => { setMicState('idle'); setStatus('', 'hidden'); }); return; }
+      startContinuous();
+    }, 700);
+  });
+
+  micBtn.addEventListener('mouseup', () => {
+    if (holdTimer !== null) {
+      clearTimeout(holdTimer);
+      holdTimer = null;
+      // Clic corto: toggle grabación simple
+      toggleRecording();
+    }
+  });
+
+  micBtn.addEventListener('mouseleave', () => {
+    if (holdTimer !== null) { clearTimeout(holdTimer); holdTimer = null; }
+  });
+
+  // Touch para móvil
+  micBtn.addEventListener('touchstart', e => { e.preventDefault(); micBtn.dispatchEvent(new MouseEvent('mousedown')); });
+  micBtn.addEventListener('touchend',   e => { e.preventDefault(); micBtn.dispatchEvent(new MouseEvent('mouseup')); });
+
+  // Botón detener en la barra
+  stopBtn.addEventListener('click', () => {
+    if (mode === 'continuous') { stopContinuous(); return; }
+    if (mode === 'recording')  { stopAndSend().then(() => { setMicState('idle'); setStatus('', 'hidden'); }); }
+  });
+
+  return { startContinuous, stopContinuous, toggleRecording };
+})();

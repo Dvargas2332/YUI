@@ -1,5 +1,30 @@
 from __future__ import annotations
 
+"""
+stt.py — Speech-to-Text para YUI
+
+Backends disponibles (en orden de prioridad):
+  1. whisper  — faster-whisper local, sin red, baja latencia (~0.3s en CPU, ~0.1s en GPU).
+               Instalar: pip install faster-whisper
+               Modelo recomendado: "base" (equilibrio velocidad/precisión).
+               Modelo pequeño: "tiny" (mínima RAM, algo menos preciso).
+               Modelo grande: "large-v3" (máxima precisión, requiere GPU o paciencia).
+               Variable: YUI_WHISPER_MODEL (default "base"), YUI_WHISPER_DEVICE (default "cpu"),
+                         YUI_WHISPER_COMPUTE (default "int8").
+  2. speech_recognition — Google STT gratuito, requiere internet, latencia 1-3s.
+  3. sounddevice        — Graba con sounddevice y transcribe con Google.
+  4. text               — Fallback stdin para modo sin micrófono.
+
+PENDIENTE (roadmap):
+  - Detección de emoción en voz: extraer pitch/energía/MFCC del audio antes de transcribir
+    y devolver un dict {"text": ..., "emotion": "neutral|felicidad|enojo|tristeza"}.
+    Librería sugerida: opensmile o speechbrain.
+  - Whisper streaming: usar faster-whisper en modo streaming para transcripción en tiempo real
+    mientras el usuario habla (requiere implementar _listen_whisper_stream()).
+  - WebRTC VAD: reemplazar el VAD simple de sounddevice por webrtcvad para mejor detección
+    de inicio/fin de habla (pip install webrtcvad).
+"""
+
 import os
 import sys
 import time
@@ -51,6 +76,101 @@ def list_devices() -> SttDevices:
         sd_names = []
 
     return SttDevices(speech_recognition=sr_names, sounddevice=sd_names)
+
+
+# ── Whisper (faster-whisper) ─────────────────────────────────────────────────
+
+_whisper_model = None
+_whisper_model_name: str = ""
+
+
+def _whisper_available() -> bool:
+    try:
+        import faster_whisper  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
+def _get_whisper_model():
+    """Lazy-load faster-whisper model. Cached after first load."""
+    global _whisper_model, _whisper_model_name
+    model_name = os.getenv("YUI_WHISPER_MODEL", "base").strip()
+    device = os.getenv("YUI_WHISPER_DEVICE", "cpu").strip()
+    compute = os.getenv("YUI_WHISPER_COMPUTE", "int8").strip()
+    if _whisper_model is None or _whisper_model_name != model_name:
+        from faster_whisper import WhisperModel  # type: ignore
+        _whisper_model = WhisperModel(model_name, device=device, compute_type=compute)
+        _whisper_model_name = model_name
+    return _whisper_model
+
+
+def transcribe_audio_bytes(audio_bytes: bytes, *, language: str = "es") -> Optional[str]:
+    """
+    Transcribe raw PCM int16 bytes using faster-whisper.
+    Called from the web voice endpoint after receiving audio from the browser.
+    Returns transcribed text or None on failure.
+    """
+    try:
+        import numpy as np
+
+        model = _get_whisper_model()
+        lang = language.split("-")[0]  # "es-CR" → "es"
+
+        audio_np = np.frombuffer(audio_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+        segments, _ = model.transcribe(audio_np, language=lang, beam_size=5, vad_filter=True)
+        text = " ".join(seg.text.strip() for seg in segments).strip()
+        return text or None
+    except Exception as e:
+        if os.getenv("YUI_DEBUG_STT", "0") not in {"0", "false"}:
+            print(f"[YUI] Whisper transcribe_audio_bytes error: {e}")
+        return None
+
+
+def _listen_whisper(
+    *,
+    language: str,
+    timeout_s: float,
+    phrase_time_limit_s: float,
+    microphone_index: int,
+) -> Optional[str]:
+    """
+    Record audio with speech_recognition mic and transcribe locally with faster-whisper.
+    Replaces the Google STT call — no internet required, ~0.3s latency on CPU.
+    """
+    try:
+        import speech_recognition as sr
+    except Exception:
+        return None
+
+    recognizer = sr.Recognizer()
+    try:
+        recognizer.pause_threshold = float(os.getenv("YUI_SR_PAUSE_THRESHOLD", "0.45"))
+        recognizer.non_speaking_duration = float(os.getenv("YUI_SR_NON_SPEAKING_DURATION", "0.25"))
+    except Exception:
+        pass
+
+    mic_index = int(microphone_index) if microphone_index is not None else -1
+    try:
+        mic = sr.Microphone(device_index=mic_index if mic_index >= 0 else None)
+    except Exception:
+        return None
+
+    with mic as source:
+        ambient_s = float(os.getenv("YUI_SR_AMBIENT_NOISE_S", "0.15"))
+        try:
+            recognizer.adjust_for_ambient_noise(source, duration=max(0.05, ambient_s))
+        except Exception:
+            pass
+        if os.getenv("YUI_STT_PRINT_LISTENING", "0") not in {"0", "false"}:
+            print("Escuchando (Whisper)...")
+        try:
+            audio = recognizer.listen(source, timeout=timeout_s, phrase_time_limit=phrase_time_limit_s)
+        except Exception:
+            return None
+
+    raw_data = audio.get_raw_data(convert_rate=16000, convert_width=2)
+    return transcribe_audio_bytes(raw_data, language=language)
 
 
 def _stdin_text_fallback() -> Optional[str]:
@@ -121,6 +241,20 @@ def listen(
 
     if backend_norm == "text":
         return _stdin_text_fallback()
+
+    # Whisper local — primer intento si faster-whisper está instalado
+    whisper_available = _whisper_available()
+    if backend_norm in {"auto", "whisper"} and whisper_available and microphone_available_speech_recognition(microphone_index=microphone_index):
+        text = _listen_whisper(
+            language=language,
+            timeout_s=timeout_s,
+            phrase_time_limit_s=phrase_time_limit_s,
+            microphone_index=microphone_index,
+        )
+        if text:
+            return text
+        if backend_norm == "whisper":
+            return None
 
     if backend_norm in {"auto", "speech_recognition"} and microphone_available_speech_recognition(microphone_index=microphone_index):
         text = _listen_speech_recognition(

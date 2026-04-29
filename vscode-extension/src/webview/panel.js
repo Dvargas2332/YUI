@@ -826,3 +826,140 @@ window.addEventListener('message', (ev) => {
       break;
   }
 });
+
+// ══════════════════════════════════════════════════════════
+// VOZ — micrófono en VSCode WebView
+// ══════════════════════════════════════════════════════════
+const VsVoice = (() => {
+  let mediaRecorder = null;
+  let chunks = [];
+  let stream = null;
+  let mode = 'idle';   // idle | recording | continuous
+  let looping = false;
+  let holdTimer = null;
+
+  const micBtn   = $('#mic-btn');
+  const bar      = $('#voice-bar');
+  const statusTx = $('#voice-status-text');
+  const stopBtn  = $('#voice-stop-btn');
+
+  if (!micBtn) return {};
+
+  function showBar(visible, continuous) {
+    if (!bar) return;
+    bar.classList.toggle('hidden', !visible);
+    bar.classList.toggle('continuous', !!continuous);
+  }
+  function setMicState(s) {
+    mode = s;
+    micBtn.classList.remove('recording', 'continuous');
+    if (s !== 'idle') micBtn.classList.add(s);
+  }
+
+  async function getStream() {
+    if (stream && stream.active) return stream;
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    return stream;
+  }
+
+  async function startRec() {
+    const s = await getStream();
+    chunks = [];
+    mediaRecorder = new MediaRecorder(s);
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+    mediaRecorder.start();
+  }
+
+  async function stopAndSend() {
+    if (!mediaRecorder || mediaRecorder.state === 'inactive') return;
+    return new Promise(resolve => {
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        chunks = [];
+        if (statusTx) statusTx.textContent = 'Transcribiendo…';
+        try {
+          // Obtener URL del servidor YUI desde config guardada en el panel
+          const baseUrl = (window._yuiHttpBase || 'http://127.0.0.1:8080');
+          const lang = 'es';
+          const res = await fetch(`${baseUrl}/api/voice`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'audio/webm', 'X-Language': lang },
+            body: blob,
+          });
+          const data = await res.json();
+          if (data.text) {
+            if (msgInput) msgInput.value = data.text;
+            sendMessage();
+            if (msgInput) msgInput.value = '';
+          } else {
+            if (statusTx) statusTx.textContent = 'No entendí. Intenta de nuevo.';
+          }
+        } catch (e) {
+          if (statusTx) statusTx.textContent = 'Error de conexión';
+        }
+        resolve();
+      };
+      mediaRecorder.stop();
+    });
+  }
+
+  async function toggleRec() {
+    if (mode === 'recording') {
+      await stopAndSend();
+      setMicState('idle');
+      showBar(false);
+    } else if (mode === 'idle') {
+      await startRec();
+      setMicState('recording');
+      showBar(true, false);
+      if (statusTx) statusTx.textContent = 'Escuchando…';
+    }
+  }
+
+  async function startContinuous() {
+    looping = true;
+    setMicState('continuous');
+    showBar(true, true);
+    while (looping) {
+      await startRec();
+      if (statusTx) statusTx.textContent = 'Habla continua — escuchando…';
+      await new Promise(r => setTimeout(r, 6000));
+      if (!looping) break;
+      await stopAndSend();
+      if (!looping) break;
+      await new Promise(r => setTimeout(r, 400));
+    }
+    stopContinuous();
+  }
+
+  function stopContinuous() {
+    looping = false;
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    setMicState('idle');
+    showBar(false);
+  }
+
+  micBtn.addEventListener('mousedown', () => {
+    holdTimer = setTimeout(() => {
+      holdTimer = null;
+      if (mode === 'continuous') { stopContinuous(); return; }
+      if (mode === 'recording') { stopAndSend().then(() => { setMicState('idle'); showBar(false); }); return; }
+      startContinuous();
+    }, 700);
+  });
+
+  micBtn.addEventListener('mouseup', () => {
+    if (holdTimer !== null) { clearTimeout(holdTimer); holdTimer = null; toggleRec(); }
+  });
+
+  micBtn.addEventListener('mouseleave', () => {
+    if (holdTimer !== null) { clearTimeout(holdTimer); holdTimer = null; }
+  });
+
+  if (stopBtn) stopBtn.addEventListener('click', () => {
+    if (mode === 'continuous') stopContinuous();
+    else if (mode === 'recording') stopAndSend().then(() => { setMicState('idle'); showBar(false); });
+  });
+
+  return { startContinuous, stopContinuous, toggleRec };
+})();
