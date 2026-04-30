@@ -103,7 +103,7 @@ class YUI:
         self._vision_every_n_frames = int(self.settings.vision_process_every_n_frames)
         self._profile: Optional[Dict[str, Any]] = None
         self._tuning_tier = "unknown"
-        self._llm_configured = bool((self.settings.llm_api_key or "").strip())
+        self._llm_configured = bool((self.settings.llm_api_key or "").strip())  # se recalcula post-init
         self._mic_meter = MicMeter(device_index=self.settings.sounddevice_input_index)
         self._desktop = DesktopController(
             confirm_timeout_s=float(os.getenv("YUI_DESKTOP_CONFIRM_TIMEOUT_S", "60")),
@@ -751,13 +751,20 @@ class YUI:
                     "status",
                     {"ui_http": True, "host": self.settings.ui_http_host, "port": int(self.settings.ui_http_port)},
                 )
-            if not self._llm_configured:
-                print("[YUI] LLM no configurado: falta YUI_LLM_API_KEY / DEEPSEEK_API_KEY.")
-                print(f"[YUI] base_url={self.settings.llm_base_url!r} model={self.settings.llm_model!r}")
-                self._speak("Estoy lista, pero no tengo conexión al modelo. Revisa tu API key.")
+            # Recalcular: configurado si hay proveedor en registry O key en .env
+            active_provider = self.brain.providers.get_active()
+            if active_provider:
+                self._llm_configured = True
+                print(f"[YUI] LLM configurado vía registry: {active_provider.name} ({active_provider.backend})")
+                if active_provider.base_url:
+                    print(f"[YUI] base_url={active_provider.base_url!r} fast={active_provider.model_fast!r}")
             else:
-                print("[YUI] LLM configurado.")
-                print(f"[YUI] base_url={self.settings.llm_base_url!r} model={self.settings.llm_model!r}")
+                self._llm_configured = bool((self.settings.llm_api_key or "").strip())
+
+            if not self._llm_configured:
+                print("[YUI] LLM no configurado: agrega un proveedor desde la UI o configura YUI_LLM_API_KEY en .env")
+                self._speak("Estoy lista, pero no tengo modelo configurado. Abre la UI y agrega un proveedor.")
+            else:
                 if os.getenv("YUI_LLM_SELFTEST", "1") not in {"0", "false", "False"}:
                     ok = self.brain.health_check()
                     print(f"[YUI] LLM self-test: {'OK' if ok else 'FAIL'}")
