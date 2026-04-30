@@ -371,12 +371,80 @@ function connectWs(port) {
       }
       return;
     }
+    if (type === 'file_diff') {
+      renderFileDiff(data, ts);
+      return;
+    }
     if (type === 'status') {
       qs('#agent-state').textContent = 'listo';
       qs('#avatar-ring').classList.remove('thinking');
       qs('#status-dot').className = 'status-dot';
     }
   });
+}
+
+// ---- FILE DIFF PANEL ----
+function renderFileDiff(data, ts) {
+  let parsed;
+  try {
+    parsed = typeof data.detail === 'string' ? JSON.parse(data.detail) : data.detail;
+  } catch {
+    return;
+  }
+  if (!parsed || !parsed.chunks) return;
+
+  const path = parsed.path || data.tool || '?';
+  const added = parsed.added || 0;
+  const removed = parsed.removed || 0;
+  const chunks = parsed.chunks || [];
+
+  // Activity log — short summary
+  addActivityLog('file', `${path.split(/[\\/]/).pop()}  +${added} -${removed}`, ts);
+
+  // Inline diff card in chat
+  const card = document.createElement('div');
+  card.className = 'file-diff-card';
+
+  // Build diff rows
+  const rows = chunks.map(c => {
+    const ln = escHtml(String(c.ln || ''));
+    if (c.old !== null && c.new !== null && c.old !== c.new) {
+      // changed line: show old (del) then new (add)
+      return [
+        `<tr class="diff-line-del"><td class="diff-ln">${ln}</td><td><span class="diff-sign">-</span>${escHtml(c.old ?? '')}</td></tr>`,
+        `<tr class="diff-line-add"><td class="diff-ln">${ln}</td><td><span class="diff-sign">+</span>${escHtml(c.new ?? '')}</td></tr>`,
+      ].join('');
+    } else if (c.old === null) {
+      return `<tr class="diff-line-add"><td class="diff-ln">${ln}</td><td><span class="diff-sign">+</span>${escHtml(c.new ?? '')}</td></tr>`;
+    } else if (c.new === null) {
+      return `<tr class="diff-line-del"><td class="diff-ln">${ln}</td><td><span class="diff-sign">-</span>${escHtml(c.old ?? '')}</td></tr>`;
+    }
+    return '';
+  }).join('');
+
+  const bodyId = 'diff-body-' + Date.now();
+  card.innerHTML = `
+    <div class="file-diff-header" onclick="toggleDiffBody('${bodyId}')">
+      <span class="file-diff-path" title="${escHtml(path)}">${escHtml(path)}</span>
+      <div class="file-diff-stats">
+        <span class="diff-stat-add">+${added}</span>
+        <span class="diff-stat-del">-${removed}</span>
+      </div>
+      <span class="file-diff-toggle" id="toggle-lbl-${bodyId}">mostrar</span>
+    </div>
+    <div class="file-diff-body collapsed" id="${bodyId}">
+      <table class="diff-table"><tbody>${rows || '<tr><td colspan="2" style="color:var(--text-muted);padding:8px">sin cambios detectados</td></tr>'}</tbody></table>
+    </div>`;
+  chatArea.appendChild(card);
+  scrollChat();
+}
+
+function toggleDiffBody(id) {
+  const body = document.getElementById(id);
+  const lbl = document.getElementById('toggle-lbl-' + id);
+  if (!body) return;
+  const collapsed = body.classList.toggle('collapsed');
+  if (lbl) lbl.textContent = collapsed ? 'mostrar' : 'ocultar';
 }
 
 // ---- TOGGLE HELPER ----

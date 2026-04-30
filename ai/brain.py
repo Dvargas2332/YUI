@@ -74,6 +74,10 @@ class Brain:
         # User profile (persistent semantic model of the user)
         self.user_profile = UserProfile(memory)
 
+        # Project context (per-repo, stored in ~/.yui/projects/)
+        self._project_ctx: Optional[Any] = None
+        self._project_ctx_workspace: str = ""
+
         # Agenda: background thread fires reminders into the conversation
         self.agenda = AgendaManager(memory, on_reminder=self._inject_reminder)
         self.agenda.start()
@@ -324,6 +328,19 @@ class Brain:
         )
         return planner.run(goal)
 
+    def _get_project_ctx(self, workspace: str) -> Optional[Any]:
+        ws = (workspace or "").strip()
+        if not ws:
+            return None
+        if ws != self._project_ctx_workspace:
+            try:
+                from memory.project_context import ProjectContext
+                self._project_ctx = ProjectContext(ws)
+                self._project_ctx_workspace = ws
+            except Exception:
+                self._project_ctx = None
+        return self._project_ctx
+
     def _build_messages(
         self,
         user_text: str,
@@ -359,6 +376,25 @@ class Brain:
                     "Cuando crees archivos o carpetas con rutas relativas, úsalo como base."
                 ),
             })
+
+        # Project context (per-repo)
+        proj_ctx = self._get_project_ctx(workspace_root)
+        if proj_ctx:
+            proj_block = proj_ctx.as_system_block()
+            if proj_block:
+                messages.append({"role": "system", "content": proj_block})
+
+        # Available tools — injected so the LLM knows exactly what it can call
+        try:
+            from ai.tools import get_all_tool_definitions
+            tool_names = [t["function"]["name"] for t in get_all_tool_definitions() if "function" in t]
+            if tool_names:
+                messages.append({
+                    "role": "system",
+                    "content": "Available tools (call them exactly by name):\n" + ", ".join(tool_names),
+                })
+        except Exception:
+            pass
 
         # Long-term memories (semantic retrieval)
         user_id = (visual.user_name or "default").strip()

@@ -451,6 +451,21 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "project_note",
+            "description": "Guarda una nota sobre el proyecto actual (repo activo). Úsalo para recordar decisiones técnicas, stack, objetivos o contexto que deba persistir entre sesiones.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note": {"type": "string", "description": "Nota a guardar sobre el proyecto."},
+                    "workspace": {"type": "string", "description": "Ruta del workspace (opcional; se usa el activo si no se da)."},
+                },
+                "required": ["note"],
+            },
+        },
+    },
 ]
 
 # Tools that require confirmation before execution
@@ -558,6 +573,19 @@ def _dispatch_browser(
         return browser_close()
     if name == "wappalyzer_analyze":
         return wappalyzer_analyze(args["url"])
+    if name == "project_note":
+        note = str(args.get("note", "")).strip()
+        workspace = str(args.get("workspace", "")).strip()
+        if not note:
+            return "[error] note es requerido"
+        try:
+            from memory.project_context import ProjectContext
+            ctx = ProjectContext(workspace)
+            ctx.add_note(note)
+            return f"[ok] Nota guardada en proyecto '{ctx.slug}': {note[:80]}"
+        except Exception as e:
+            return f"[error] No se pudo guardar la nota: {e}"
+
     return f"[error] Herramienta desconocida: {name}"
 
 

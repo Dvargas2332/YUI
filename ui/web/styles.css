@@ -1398,3 +1398,79 @@ code.md-inline {
   display: block;
   margin-top: .2rem;
 }
+
+/* ── File diff card (inline en chat) ───────────────────────────────────── */
+.file-diff-card {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  margin: 4px 0 8px 0;
+  font-size: 0.78rem;
+  overflow: hidden;
+}
+.file-diff-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  user-select: none;
+}
+.file-diff-path {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+.file-diff-stats {
+  display: flex;
+  gap: 8px;
+  font-size: 0.72rem;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+.diff-stat-add { color: var(--accent-green); font-weight: 600; }
+.diff-stat-del { color: var(--accent-red); font-weight: 600; }
+.file-diff-toggle { color: var(--text-muted); font-size: 0.7rem; margin-left: 8px; }
+.file-diff-body {
+  overflow-x: auto;
+  max-height: 320px;
+  overflow-y: auto;
+}
+.file-diff-body.collapsed { display: none; }
+.diff-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.72rem;
+}
+.diff-table td {
+  padding: 1px 10px;
+  white-space: pre;
+  vertical-align: top;
+  line-height: 1.5;
+}
+.diff-table .diff-ln {
+  color: var(--text-muted);
+  width: 36px;
+  text-align: right;
+  border-right: 1px solid var(--border);
+  padding-right: 6px;
+  user-select: none;
+  opacity: 0.55;
+}
+.diff-line-add { background: rgba(74, 222, 128, 0.08); color: var(--accent-green); }
+.diff-line-add .diff-sign { color: var(--accent-green); }
+.diff-line-del { background: rgba(248, 113, 113, 0.08); color: var(--accent-red); }
+.diff-line-del .diff-sign { color: var(--accent-red); }
+.diff-line-ctx { color: var(--text-muted); }
+.diff-sign { width: 14px; display: inline-block; text-align: center; flex-shrink: 0; }
+
+/* mini badge en activity log para file edits */
+.activity-item .act-kind.file { color: var(--accent); }
