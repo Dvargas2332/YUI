@@ -25,6 +25,26 @@ from ai.modules.context import VisualContext
 from memory.embedder import cosine_similarity, embed, vec_from_json, vec_to_json
 from pathlib import Path as _Path
 
+# Señales de rechazo ético duro → saltar al siguiente proveedor
+_ETHICAL_REFUSAL = [
+    "i cannot", "i'm unable", "i am unable", "i can't", "i won't",
+    "no puedo ayudar", "no puedo proporcionar", "no me es posible",
+    "esto va en contra", "va contra mis", "mis directrices",
+    "copyright", "derechos de autor", "contenido explícito",
+    "política de uso", "política de contenido", "terms of service",
+    "as an ai", "como ia", "como inteligencia artificial",
+    "i must decline", "i have to decline", "i cannot assist",
+    "no está permitido", "no es apropiado", "no es adecuado",
+]
+
+# Señales de respuesta dudosa → consultar otros proveedores y votar
+_DOUBTFUL_SIGNALS = [
+    "no estoy seguro", "no sé con certeza", "podría ser",
+    "no tengo información suficiente", "no lo sé",
+    "i'm not sure", "i don't know", "uncertain", "unclear",
+    "it depends", "depende", "no puedo confirmar",
+]
+
 
 SYSTEM_PROMPT = """
 Eres YUI, una asistente de voz con visión (cámara) y memoria.
@@ -160,8 +180,14 @@ _PENDING_WORK_SIGNALS = [
 
 class Reasoner:
     """
-    Handles all LLM interactions: model routing, API calls, agentic loop.
+    Handles all LLM interactions: model routing, cascade fallback, agentic loop.
     Brain delegates here for anything that requires calling the LLM.
+
+    Cascade flow:
+      1. Elige proveedor óptimo para la tarea (por strengths + cascade_order)
+      2. Si hay rechazo ético → siguiente proveedor
+      3. Si hay respuesta dudosa → consulta todos los demás y vota la mejor
+      4. Si varios responden bien → reasoning vote para elegir la mejor
     """
 
     def __init__(
@@ -170,6 +196,8 @@ class Reasoner:
         memory: MemoryStore,
         confirm_fn: Optional[Callable[[str], bool]] = None,
         step_fn: Optional[Callable[[str, str, Optional[str]], None]] = None,
+        provider_registry: Optional[Any] = None,
+        prompt_rules: Optional[Any] = None,
     ):
         self.settings = settings
         self.memory = memory
@@ -179,6 +207,15 @@ class Reasoner:
         self._system_prompt_override: Optional[str] = None
         self._abort_event: threading.Event = threading.Event()
         self._current_workspace_root: str = ""
+        self._provider_registry: Optional[Any] = provider_registry
+        self._prompt_rules: Optional[Any] = prompt_rules
+        self._backend_cache: Dict[str, Any] = {}
+
+    def set_provider_registry(self, registry: Any) -> None:
+        self._provider_registry = registry
+
+    def set_prompt_rules(self, prompt_rules: Any) -> None:
+        self._prompt_rules = prompt_rules
 
     def abort(self) -> None:
         self._abort_event.set()
@@ -186,11 +223,191 @@ class Reasoner:
     def _check_abort(self) -> bool:
         return self._abort_event.is_set()
 
-    def get_system_prompt(self) -> str:
+    def get_system_prompt(self, extra: Optional[str] = None) -> str:
+        if self._prompt_rules is not None:
+            return self._prompt_rules.build_full_system(extra)
         return self._system_prompt_override or SYSTEM_PROMPT
 
     def set_system_prompt(self, prompt: str) -> None:
-        self._system_prompt_override = prompt.strip() or None
+        if self._prompt_rules is not None:
+            self._prompt_rules.set_prompt(prompt)
+        else:
+            self._system_prompt_override = prompt.strip() or None
+
+    # ── Backend factory ───────────────────────────────────────────────────────
+
+    def _get_backend(self, provider: Any) -> Any:
+        """Devuelve (y cachea) el backend correspondiente al proveedor."""
+        pid = provider.id
+        if pid not in self._backend_cache:
+            from config.providers import BACKEND_LOCAL
+            from ai.backends.openai_compat import OpenAICompatBackend
+            from ai.backends.local_backend import LocalBackend
+            if provider.backend == BACKEND_LOCAL:
+                self._backend_cache[pid] = LocalBackend(provider)
+            else:
+                self._backend_cache[pid] = OpenAICompatBackend(provider)
+        return self._backend_cache[pid]
+
+    def _invalidate_backend(self, provider_id: str) -> None:
+        self._backend_cache.pop(provider_id, None)
+
+    def _active_provider(self) -> Any:
+        """Retorna el proveedor activo del registry, o None si no hay registry."""
+        if self._provider_registry is not None:
+            return self._provider_registry.get_active()
+        return None
+
+    def _cascade_providers(self) -> List[Any]:
+        """Lista ordenada de proveedores para cascada."""
+        if self._provider_registry is not None:
+            return self._provider_registry.cascade_order()
+        return []
+
+    def _best_provider_for(self, task: str) -> Any:
+        """Mejor proveedor para una tarea dada."""
+        if self._provider_registry is not None:
+            return self._provider_registry.best_for_task(task)
+        return self._active_provider()
+
+    # ── Cascade helpers ───────────────────────────────────────────────────────
+
+    @staticmethod
+    def _is_ethical_refusal(text: str) -> bool:
+        low = (text or "").lower()
+        return any(sig in low for sig in _ETHICAL_REFUSAL)
+
+    @staticmethod
+    def _is_doubtful(text: str) -> bool:
+        low = (text or "").lower()
+        return any(sig in low for sig in _DOUBTFUL_SIGNALS)
+
+    def _cascade_chat(
+        self,
+        messages: List[Dict[str, Any]],
+        *,
+        model_mode: str,
+        temperature: float,
+        max_tokens: int,
+        task_hint: str = "",
+    ) -> str:
+        """
+        Llama al LLM con cascada:
+        - Empieza por el mejor proveedor para la tarea
+        - Si rechazo ético → siguiente en cascada
+        - Si respuesta dudosa → polling de todos + reasoning vote
+        - Si varios responden bien → reasoning vote
+        """
+        providers = self._cascade_providers()
+        if not providers:
+            return self._chat_legacy(messages, temperature=temperature, max_tokens=max_tokens)
+
+        # Reordenar: el mejor para la tarea va primero
+        best = self._best_provider_for(task_hint) if task_hint else None
+        if best:
+            providers = [best] + [p for p in providers if p.id != best.id]
+
+        refused: List[str] = []
+        good_responses: List[Tuple[str, str]] = []  # (provider_name, response)
+
+        for provider in providers:
+            backend = self._get_backend(provider)
+            model = provider.effective_model_deep() if model_mode == "deep" else provider.effective_model_fast()
+            if not model:
+                continue
+            timeout = provider.timeout_s if provider.timeout_s > 0 else float(self.settings.llm_timeout_s)
+            try:
+                if self.step_fn:
+                    try:
+                        self.step_fn("analysis", f"cascade:{provider.name}", None)
+                    except Exception:
+                        pass
+                response = backend.chat(messages, model=model, temperature=temperature,
+                                        max_tokens=max_tokens, timeout_s=timeout)
+                if not response or not response.strip():
+                    continue
+                if self._is_ethical_refusal(response):
+                    print(f"[YUI] Cascade: {provider.name} rechazó (ético) → siguiente")
+                    refused.append(provider.name)
+                    continue
+                if self._is_doubtful(response):
+                    print(f"[YUI] Cascade: {provider.name} respuesta dudosa → consultando otros")
+                    good_responses.append((provider.name, response))
+                    # Sigue consultando todos para votar
+                    continue
+                good_responses.append((provider.name, response))
+                # Si solo hay una respuesta buena hasta ahora, la retorna directamente
+                # (evita latencia extra). Si ya hay varias, vota al final del loop.
+                if len(good_responses) == 1 and len(providers) <= 2:
+                    return response
+            except Exception as e:
+                print(f"[YUI] Cascade: {provider.name} error: {e}")
+                continue
+
+        if not good_responses:
+            if refused:
+                return "Lo siento, ninguno de los modelos disponibles pudo responder a esa solicitud."
+            return "No pude obtener respuesta de ningún proveedor. Revisa la configuración."
+
+        if len(good_responses) == 1:
+            return good_responses[0][1]
+
+        # Varios respondieron → reasoning vote
+        return self._vote_best_response(messages, good_responses, temperature=temperature, max_tokens=max_tokens)
+
+    def _vote_best_response(
+        self,
+        original_messages: List[Dict[str, Any]],
+        candidates: List[Tuple[str, str]],
+        *,
+        temperature: float,
+        max_tokens: int,
+    ) -> str:
+        """Usa el proveedor activo para razonar y elegir la mejor respuesta entre candidatos."""
+        if len(candidates) == 1:
+            return candidates[0][1]
+
+        original_question = ""
+        for m in reversed(original_messages):
+            if m.get("role") == "user":
+                original_question = str(m.get("content", ""))
+                break
+
+        options_text = "\n\n".join(
+            f"[Opción {i+1} - {name}]:\n{resp}"
+            for i, (name, resp) in enumerate(candidates)
+        )
+        vote_messages = [
+            {"role": "system", "content": (
+                "Eres un evaluador experto. Se te presentan varias respuestas de distintos modelos "
+                "a la misma pregunta. Analiza cuál es más precisa, completa y útil. "
+                "Responde SOLO con el contenido de la mejor respuesta, sin modificarla ni agregar nada."
+            )},
+            {"role": "user", "content": (
+                f"Pregunta original: {original_question}\n\n"
+                f"Respuestas candidatas:\n{options_text}\n\n"
+                "¿Cuál es la mejor respuesta? Devuelve solo su contenido."
+            )},
+        ]
+
+        try:
+            provider = self._active_provider()
+            if provider:
+                backend = self._get_backend(provider)
+                model = provider.effective_model_fast()
+                timeout = provider.timeout_s if provider.timeout_s > 0 else float(self.settings.llm_timeout_s)
+                result = backend.chat(vote_messages, model=model, temperature=0.1,
+                                      max_tokens=max_tokens, timeout_s=timeout)
+                if result and result.strip():
+                    print(f"[YUI] Cascade vote → eligió respuesta de entre {len(candidates)} candidatos")
+                    return result.strip()
+        except Exception as e:
+            print(f"[YUI] Cascade vote error: {e}")
+
+        # Fallback: retorna la primera respuesta buena
+        return candidates[0][1]
+
+    # ── Route ─────────────────────────────────────────────────────────────────
 
     def route(self, user_text: str) -> Tuple[str, float, str, int]:
         base_tokens = self._base_max_tokens()
@@ -217,6 +434,10 @@ class Reasoner:
         return int(os.getenv("YUI_LLM_MAX_TOKENS") or getattr(self.settings, "llm_max_tokens", 0) or 0)
 
     def health_check(self) -> bool:
+        provider = self._active_provider()
+        if provider:
+            backend = self._get_backend(provider)
+            return backend.is_available()
         if not (self.settings.llm_api_key or "").strip():
             return False
         try:
@@ -225,22 +446,12 @@ class Reasoner:
             client = OpenAI(api_key=self.settings.llm_api_key, base_url=base, timeout=self.settings.llm_timeout_s)
             client.models.list()
             return True
-        except Exception as e:
+        except Exception:
             try:
-                from openai import OpenAI
-                base = self.settings.llm_base_url.rstrip("/")
-                base_v1 = base if base.endswith("/v1") else f"{base}/v1"
-                client = OpenAI(api_key=self.settings.llm_api_key, base_url=base_v1, timeout=self.settings.llm_timeout_s)
-                client.models.list()
-                return True
-            except Exception as e2:
-                try:
-                    return self._health_check_requests()
-                except Exception as e3:
-                    print(f"[YUI] health_check failed: {type(e).__name__}: {e}")
-                    print(f"[YUI] health_check failed (retry): {type(e2).__name__}: {e2}")
-                    print(f"[YUI] health_check failed (requests): {type(e3).__name__}: {e3}")
-                    return False
+                return self._health_check_requests()
+            except Exception as e:
+                print(f"[YUI] health_check failed: {e}")
+                return False
 
     def _health_check_requests(self) -> bool:
         base = self.settings.llm_base_url.rstrip("/")
@@ -266,14 +477,19 @@ class Reasoner:
         workspace_root: str = "",
         max_tokens: int = 0,
         tools_enabled: bool = True,
+        task_hint: str = "",
+        model_mode: str = "fast",
     ) -> str:
         self._abort_event.clear()
         self._current_workspace_root = workspace_root
         try:
             if tools_enabled:
-                return self._agentic_loop(messages, model=model, temperature=temperature, workspace_root=workspace_root, max_tokens=max_tokens)
+                return self._agentic_loop(messages, model=model, temperature=temperature,
+                                          workspace_root=workspace_root, max_tokens=max_tokens,
+                                          task_hint=task_hint, model_mode=model_mode)
             else:
-                return self._chat(messages, model=model, temperature=temperature, max_tokens=max_tokens)
+                return self._chat(messages, model=model, temperature=temperature,
+                                  max_tokens=max_tokens, task_hint=task_hint, model_mode=model_mode)
         except HTTPError as e:
             status = getattr(getattr(e, "response", None), "status_code", None)
             body = getattr(getattr(e, "response", None), "text", "") or ""
@@ -310,7 +526,9 @@ class Reasoner:
         low = response.lower()
         return any(sig in low for sig in _PENDING_WORK_SIGNALS)
 
-    def _agentic_loop(self, messages: List[Dict[str, Any]], *, model: str, temperature: float, workspace_root: str = "", max_tokens: int = 0) -> str:
+    def _agentic_loop(self, messages: List[Dict[str, Any]], *, model: str, temperature: float,
+                      workspace_root: str = "", max_tokens: int = 0,
+                      task_hint: str = "", model_mode: str = "fast") -> str:
         max_iterations = int(os.getenv("YUI_TOOLS_MAX_ITERATIONS", "20"))
         msgs: List[Dict[str, Any]] = list(messages)
         _tools_used_count = 0
@@ -319,7 +537,9 @@ class Reasoner:
             if self._check_abort():
                 return "Detenido."
 
-            raw: Any = self._chat_with_tools(msgs, model=model, temperature=temperature, max_tokens=max_tokens)
+            provider = self._best_provider_for(task_hint) if task_hint else self._active_provider()
+            raw: Any = self._chat_with_tools(msgs, model=model, temperature=temperature,
+                                             max_tokens=max_tokens, provider=provider)
 
             if isinstance(raw, str):
                 if _tools_used_count > 0 and self._signals_pending_work(raw):
@@ -373,7 +593,8 @@ class Reasoner:
                     if remaining_idx < len(tool_calls) - 1:
                         msgs.append({"role": "user", "content": f"Resultado de {t_name}: {t_result}\nContinúa con el siguiente paso."})
                         try:
-                            _interim = self._chat_with_tools(msgs, model=model, temperature=temperature, max_tokens=max_tokens)
+                            _interim = self._chat_with_tools(msgs, model=model, temperature=temperature,
+                                                            max_tokens=max_tokens, provider=provider)
                             if isinstance(_interim, str):
                                 clean = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", _interim, flags=re.IGNORECASE).strip()
                                 clean = re.sub(r"<[^>]+>", "", clean).strip()
@@ -393,7 +614,8 @@ class Reasoner:
                         ),
                     })
                     try:
-                        final = self._chat(msgs, model=model, temperature=temperature, max_tokens=max_tokens)
+                        final = self._chat(msgs, model=model, temperature=temperature,
+                                          max_tokens=max_tokens, task_hint=task_hint, model_mode=model_mode)
                         if final and final.strip():
                             clean = re.sub(r"<tool_call>[\s\S]*?</tool_call>", "", final, flags=re.IGNORECASE).strip()
                             clean = re.sub(r"<[^>]+>", "", clean).strip()
@@ -467,7 +689,19 @@ class Reasoner:
             pass
         return "Completé las operaciones solicitadas."
 
-    def _chat_with_tools(self, messages: List[Dict[str, Any]], *, model: str, temperature: float, max_tokens: int = 0) -> Any:
+    def _chat_with_tools(self, messages: List[Dict[str, Any]], *, model: str, temperature: float,
+                         max_tokens: int = 0, provider: Any = None) -> Any:
+        # Si hay un proveedor explícito, usa su backend
+        if provider is not None:
+            try:
+                backend = self._get_backend(provider)
+                tools = get_all_tool_definitions()
+                return backend.chat_with_tools(messages, tools, model=model,
+                                               temperature=temperature, max_tokens=max_tokens,
+                                               timeout_s=float(self.settings.llm_timeout_s))
+            except Exception as exc:
+                print(f"[YUI] Tool chat (backend) fallback to plain: {type(exc).__name__}: {exc}")
+                return self._chat(messages, model=model, temperature=temperature, max_tokens=max_tokens)
         try:
             from openai import OpenAI
             return self._chat_openai_tools(OpenAI, messages, model=model, temperature=temperature, max_tokens=max_tokens)
@@ -555,12 +789,22 @@ class Reasoner:
 
         return result
 
-    def _chat(self, messages: List[Dict[str, Any]], *, model: str, temperature: float, max_tokens: int = 0) -> str:
+    def _chat(self, messages: List[Dict[str, Any]], *, model: str = "", temperature: float,
+              max_tokens: int = 0, task_hint: str = "", model_mode: str = "fast") -> str:
+        # Con registry activo: usa cascada
+        if self._provider_registry is not None and self._cascade_providers():
+            return self._cascade_chat(messages, model_mode=model_mode, temperature=temperature,
+                                      max_tokens=max_tokens, task_hint=task_hint)
+        return self._chat_legacy(messages, model=model, temperature=temperature, max_tokens=max_tokens)
+
+    def _chat_legacy(self, messages: List[Dict[str, Any]], *, model: str = "", temperature: float, max_tokens: int = 0) -> str:
+        """Fallback al comportamiento original cuando no hay registry configurado."""
+        resolved_model = model or self.settings.llm_model_fast
         try:
             from openai import OpenAI
-            return self._chat_openai_sdk(OpenAI, messages, model=model, temperature=temperature, max_tokens=max_tokens)
+            return self._chat_openai_sdk(OpenAI, messages, model=resolved_model, temperature=temperature, max_tokens=max_tokens)
         except Exception:
-            return self._chat_requests(messages, model=model, temperature=temperature, max_tokens=max_tokens)
+            return self._chat_requests(messages, model=resolved_model, temperature=temperature, max_tokens=max_tokens)
 
     def _chat_openai_sdk(self, OpenAI: Any, messages: List[Dict[str, Any]], *, model: str, temperature: float, max_tokens: int = 0) -> str:
         base = self.settings.llm_base_url.rstrip("/")

@@ -600,6 +600,74 @@ class YUI:
                 return {"ok": False, "error": str(e)}
         return {"ok": False, "error": "unknown_action"}
 
+    def _handle_providers(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        reg = self.brain.providers
+        try:
+            if action == "list":
+                return {"ok": True, "providers": reg.list_all()}
+            if action == "add":
+                p = reg.add(payload)
+                return {"ok": True, "provider": p.to_dict()}
+            if action == "update":
+                pid = str(payload.get("id") or "")
+                p = reg.update(pid, payload)
+                if p is None:
+                    return {"ok": False, "error": "not_found"}
+                return {"ok": True, "provider": p.to_dict()}
+            if action == "delete":
+                pid = str(payload.get("id") or "")
+                return {"ok": reg.delete(pid)}
+            if action == "set_active":
+                pid = str(payload.get("id") or "")
+                ok = reg.set_active(pid)
+                # Invalidar cache del backend anterior
+                self.brain.reasoner._invalidate_backend(pid)
+                return {"ok": ok}
+            if action == "set_order":
+                ids = list(payload.get("ids") or [])
+                reg.set_cascade_order(ids)
+                return {"ok": True}
+            if action == "fetch_models":
+                pid = str(payload.get("id") or "")
+                models = reg.fetch_models(pid)
+                return {"ok": True, "models": models}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "unknown_action"}
+
+    def _handle_prompt(self, action: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        pm = self.brain.prompt_rules
+        try:
+            if action == "get":
+                return {"ok": True, **pm.to_dict()}
+            if action == "set_prompt":
+                pm.set_prompt(str(payload.get("prompt") or ""))
+                return {"ok": True}
+            if action == "reset_prompt":
+                pm.reset_prompt()
+                return {"ok": True}
+            if action == "add_rule":
+                pm.add_rule(str(payload.get("rule") or ""))
+                return {"ok": True, **pm.to_dict()}
+            if action == "remove_rule":
+                idx = int(payload.get("index", -1))
+                ok = pm.remove_rule(idx)
+                return {"ok": ok, **pm.to_dict()}
+            if action == "update_rule":
+                idx = int(payload.get("index", -1))
+                ok = pm.update_rule(idx, str(payload.get("rule") or ""))
+                return {"ok": ok, **pm.to_dict()}
+            if action == "set_rules":
+                rules = list(payload.get("rules") or [])
+                pm.set_rules(rules)
+                return {"ok": True}
+            if action == "reset_rules":
+                pm.reset_rules()
+                return {"ok": True, **pm.to_dict()}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+        return {"ok": False, "error": "unknown_action"}
+
     def _init_runtime_profile(self) -> None:
         if os.getenv("YUI_ENV_PROFILE", "1") in {"0", "false", "False"}:
             return
@@ -675,6 +743,8 @@ class YUI:
                     on_set_mode=self._set_llm_mode,
                     on_plugin_action=self._plugin_action,
                     on_shutdown=self.shutdown,
+                    on_providers=self._handle_providers,
+                    on_prompt=self._handle_prompt,
                 )
                 self._ui_http.start()
                 self.ui_bus.publish(

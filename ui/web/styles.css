@@ -1188,3 +1188,213 @@ code.md-inline {
   border-color: var(--accent-red);
   color: #fff;
 }
+
+/* ── Providers panel ────────────────────────────────────────────────────── */
+.providers-list {
+  display: flex;
+  flex-direction: column;
+  gap: .75rem;
+}
+
+.provider-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  transition: border-color 0.15s;
+}
+.provider-card.active {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.provider-card.active .provider-active-badge { display: inline-block; }
+
+.provider-drag-handle {
+  color: var(--text-muted);
+  cursor: grab;
+  font-size: 1.2rem;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.provider-order-badge {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: .75rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+.provider-card.active .provider-order-badge {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.provider-info { flex: 1; min-width: 0; }
+.provider-name {
+  font-weight: 600;
+  font-size: .95rem;
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+}
+.provider-active-badge {
+  display: none;
+  font-size: .65rem;
+  font-weight: 700;
+  background: var(--accent);
+  color: #fff;
+  padding: 1px 7px;
+  border-radius: 99px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+}
+.provider-meta {
+  font-size: .78rem;
+  color: var(--text-muted);
+  margin-top: .2rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.provider-strengths {
+  display: flex;
+  flex-wrap: wrap;
+  gap: .3rem;
+  margin-top: .4rem;
+}
+.strength-tag {
+  font-size: .68rem;
+  padding: 1px 7px;
+  border-radius: 99px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.provider-actions {
+  display: flex;
+  gap: .4rem;
+  flex-shrink: 0;
+}
+
+/* Cascade flow diagram */
+.cascade-flow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0;
+  margin-top: .75rem;
+}
+.cascade-node {
+  display: flex;
+  align-items: center;
+  gap: 0;
+}
+.cascade-box {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: .4rem .9rem;
+  font-size: .8rem;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.cascade-box.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.cascade-arrow {
+  color: var(--text-muted);
+  font-size: 1.1rem;
+  padding: 0 .4rem;
+  flex-shrink: 0;
+}
+.cascade-label {
+  font-size: .65rem;
+  color: var(--accent-amber);
+  text-align: center;
+  display: block;
+  margin-top: .15rem;
+}
+
+/* Provider form */
+.provider-form-wrap { margin-top: 1.5rem; }
+.provider-form-card {}
+.provider-form-cols {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr;
+  gap: 1.5rem;
+  margin-top: .75rem;
+}
+.provider-form-actions {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  margin-top: 1rem;
+}
+
+/* Rules list */
+.rules-list {
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  margin-top: .5rem;
+}
+.rule-item {
+  display: flex;
+  align-items: center;
+  gap: .6rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: .45rem .75rem;
+}
+.rule-item-text {
+  flex: 1;
+  font-size: .85rem;
+}
+.rule-item input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-size: .85rem;
+  font-family: inherit;
+}
+.rule-item-actions { display: flex; gap: .3rem; flex-shrink: 0; }
+
+/* card header row */
+.card-header-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: .75rem;
+}
+.card-header-row > div { flex: 1; }
+
+.save-msg {
+  font-size: .8rem;
+  color: var(--accent-green);
+}
+.save-msg.error { color: var(--accent-red); }
+.save-msg.hidden { display: none; }
+
+.field-hint {
+  font-size: .75rem;
+  color: var(--text-muted);
+  display: block;
+  margin-top: .2rem;
+}

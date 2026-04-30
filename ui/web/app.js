@@ -694,19 +694,33 @@ qs('#save-prompt-btn').addEventListener('click', async () => {
   const prompt = qs('#cfg-system-prompt').value.trim();
   if (!prompt) return;
   try {
-    const res = await fetch('/api/config', {
+    const res = await fetch('/api/prompt', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ YUI_SYSTEM_PROMPT_OVERRIDE: prompt }),
+      body: JSON.stringify({ action: 'set_prompt', prompt }),
     });
     const data = await res.json();
+    const msg = qs('#prompt-save-msg');
     if (data.ok) {
       delete qs('#cfg-system-prompt').dataset.dirty;
-      addMsg('system', '✓ Prompt del sistema guardado. Reinicia YUI para aplicarlo.');
+      msg.textContent = '✓ Guardado';
+      msg.className = 'save-msg';
+    } else {
+      msg.textContent = '✗ Error: ' + (data.error || '?');
+      msg.className = 'save-msg error';
     }
+    msg.classList.remove('hidden');
+    setTimeout(() => msg.classList.add('hidden'), 3000);
   } catch (err) {
     addMsg('system', 'Error guardando prompt: ' + err.message);
   }
+});
+
+qs('#reset-prompt-btn').addEventListener('click', async () => {
+  if (!confirm('¿Resetear al prompt por defecto?')) return;
+  await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'reset_prompt' }) });
+  await loadPromptRules();
 });
 
 qs('#apply-style-btn').addEventListener('click', async () => {
@@ -927,3 +941,286 @@ const VoiceUI = (() => {
 
   return { startContinuous, stopContinuous, toggleRecording };
 })();
+
+// ════════════════════════════════════════════════════════════════════════════
+// PROVIDERS UI
+// ════════════════════════════════════════════════════════════════════════════
+const ProvidersUI = (() => {
+  let _providers = [];
+  let _editingId = null;
+
+  const api = (action, body = {}) =>
+    fetch('/api/providers', { method: action === 'list' ? 'GET' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: action === 'list' ? undefined : JSON.stringify({ action, ...body }),
+    }).then(r => r.json());
+
+  const fetchModelsApi = (id) =>
+    fetch('/api/providers/fetch-models', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    }).then(r => r.json());
+
+  function renderCascadeFlow(providers) {
+    const el = qs('#cascade-flow');
+    if (!providers.length) { el.innerHTML = '<span style="color:var(--text-muted);font-size:.85rem">Sin proveedores configurados.</span>'; return; }
+    el.innerHTML = providers.map((p, i) => `
+      <div class="cascade-node">
+        <div>
+          <div class="cascade-box ${p.active ? 'active' : ''}">${p.name}</div>
+          <span class="cascade-label">${p.backend === 'local' ? 'local' : 'api'}</span>
+        </div>
+        ${i < providers.length - 1 ? '<span class="cascade-arrow" title="si rechaza → siguiente">→</span>' : ''}
+      </div>`).join('');
+  }
+
+  function renderProviders(providers) {
+    _providers = providers;
+    const el = qs('#providers-list');
+    if (!providers.length) {
+      el.innerHTML = '<p style="color:var(--text-muted);padding:.5rem 0">No hay proveedores. Agrega uno con el botón de arriba.</p>';
+      renderCascadeFlow([]);
+      return;
+    }
+    el.innerHTML = providers.map(p => `
+      <div class="provider-card ${p.active ? 'active' : ''}" data-id="${p.id}">
+        <div class="provider-order-badge">${p.cascade_order}</div>
+        <div class="provider-info">
+          <div class="provider-name">
+            ${p.name}
+            <span class="provider-active-badge">activo</span>
+            <span style="font-size:.7rem;color:var(--text-muted);font-weight:400">${p.backend === 'local' ? '⬡ local' : '⬡ api'}</span>
+          </div>
+          <div class="provider-meta">
+            ${p.backend === 'local'
+              ? `${p.local_type} · ${p.local_model || 'sin modelo'} · ${p.local_url || 'localhost:11434'}`
+              : `${p.base_url || '—'} · fast: ${p.model_fast || '—'} · deep: ${p.model_deep || '—'}`}
+          </div>
+          <div class="provider-strengths">
+            ${(p.strengths || []).map(s => `<span class="strength-tag">${s}</span>`).join('')}
+          </div>
+        </div>
+        <div class="provider-actions">
+          ${!p.active ? `<button class="btn-accent" data-action="activate" data-id="${p.id}">Activar</button>` : ''}
+          <button class="btn-ghost-sm" data-action="edit" data-id="${p.id}">Editar</button>
+          <button class="btn-ghost-sm" style="color:var(--accent-red)" data-action="delete" data-id="${p.id}">✕</button>
+        </div>
+      </div>`).join('');
+    renderCascadeFlow(providers);
+  }
+
+  async function loadProviders() {
+    const data = await api('list');
+    if (data.ok) renderProviders(data.providers || []);
+  }
+
+  function showForm(provider = null) {
+    _editingId = provider ? provider.id : null;
+    qs('#provider-form-title').textContent = provider ? 'Editar proveedor' : 'Nuevo proveedor';
+    qs('#pf-name').value = provider?.name || '';
+    qs('#pf-backend').value = provider?.backend || 'openai_compat';
+    qs('#pf-order').value = provider?.cascade_order || (_providers.length + 1);
+    qs('#pf-strengths').value = (provider?.strengths || ['general']).join(',');
+    qs('#pf-timeout').value = provider?.timeout_s || 0;
+    qs('#pf-base-url').value = provider?.base_url || '';
+    qs('#pf-api-key').value = provider?.api_key || '';
+    qs('#pf-model-fast').value = provider?.model_fast || '';
+    qs('#pf-model-deep').value = provider?.model_deep || '';
+    qs('#pf-local-type').value = provider?.local_type || 'ollama';
+    qs('#pf-local-model').value = provider?.local_model || '';
+    qs('#pf-local-url').value = provider?.local_url || 'http://localhost:11434';
+    qs('#pf-n-ctx').value = provider?.local_n_ctx || 4096;
+    qs('#pf-n-gpu').value = provider?.local_n_gpu_layers || 0;
+    updateBackendCols();
+    qs('#provider-form-wrap').classList.remove('hidden');
+    qs('#pf-status').classList.add('hidden');
+    qs('#pf-name').focus();
+  }
+
+  function hideForm() {
+    qs('#provider-form-wrap').classList.add('hidden');
+    _editingId = null;
+  }
+
+  function updateBackendCols() {
+    const isLocal = qs('#pf-backend').value === 'local';
+    qs('#pf-col-api').classList.toggle('hidden', isLocal);
+    qs('#pf-col-local').classList.toggle('hidden', !isLocal);
+  }
+
+  function populateModelsList(models) {
+    const dl = qs('#pf-models-list');
+    dl.innerHTML = models.map(m => `<option value="${m}">`).join('');
+  }
+
+  async function fetchModelsForForm() {
+    if (_editingId) {
+      const data = await fetchModelsApi(_editingId);
+      if (data.ok && data.models.length) { populateModelsList(data.models); return; }
+    }
+    // Sin ID guardado: hacer fetch ad-hoc con los datos del form
+    const isLocal = qs('#pf-backend').value === 'local';
+    const body = isLocal
+      ? { id: '__preview__', backend: 'local', local_type: qs('#pf-local-type').value,
+          local_url: qs('#pf-local-url').value }
+      : { id: '__preview__', backend: 'openai_compat',
+          base_url: qs('#pf-base-url').value, api_key: qs('#pf-api-key').value };
+    // Crear proveedor temporal, fetch, eliminar
+    const addRes = await api('add', body);
+    if (!addRes.ok) return;
+    const tmpId = addRes.provider.id;
+    const modelsRes = await fetchModelsApi(tmpId);
+    await api('delete', { id: tmpId });
+    if (modelsRes.ok && modelsRes.models.length) populateModelsList(modelsRes.models);
+  }
+
+  async function saveProvider() {
+    const isLocal = qs('#pf-backend').value === 'local';
+    const data = {
+      name: qs('#pf-name').value.trim(),
+      backend: qs('#pf-backend').value,
+      cascade_order: parseInt(qs('#pf-order').value) || 1,
+      strengths: qs('#pf-strengths').value.split(',').map(s => s.trim()).filter(Boolean),
+      timeout_s: parseFloat(qs('#pf-timeout').value) || 0,
+      base_url: qs('#pf-base-url').value.trim(),
+      api_key: qs('#pf-api-key').value,
+      model_fast: qs('#pf-model-fast').value.trim(),
+      model_deep: qs('#pf-model-deep').value.trim(),
+      local_type: qs('#pf-local-type').value,
+      local_model: qs('#pf-local-model').value.trim(),
+      local_url: qs('#pf-local-url').value.trim(),
+      local_n_ctx: parseInt(qs('#pf-n-ctx').value) || 4096,
+      local_n_gpu_layers: parseInt(qs('#pf-n-gpu').value) || 0,
+    };
+    if (!data.name) { alert('El nombre es requerido'); return; }
+    const action = _editingId ? 'update' : 'add';
+    if (_editingId) data.id = _editingId;
+    const res = await api(action, data);
+    const msg = qs('#pf-status');
+    if (res.ok) {
+      msg.textContent = '✓ Guardado';
+      msg.className = 'save-msg';
+      msg.classList.remove('hidden');
+      await loadProviders();
+      setTimeout(() => hideForm(), 800);
+    } else {
+      msg.textContent = '✗ ' + (res.error || 'Error');
+      msg.className = 'save-msg error';
+      msg.classList.remove('hidden');
+    }
+  }
+
+  // Events
+  qs('#add-provider-btn').addEventListener('click', () => showForm());
+  qs('#pf-cancel-btn').addEventListener('click', hideForm);
+  qs('#pf-save-btn').addEventListener('click', saveProvider);
+  qs('#pf-backend').addEventListener('change', updateBackendCols);
+  qs('#pf-toggle-key').addEventListener('click', () => {
+    const inp = qs('#pf-api-key');
+    inp.type = inp.type === 'password' ? 'text' : 'password';
+  });
+  qs('#pf-fetch-models').addEventListener('click', fetchModelsForForm);
+  qs('#pf-fetch-local-models').addEventListener('click', fetchModelsForForm);
+
+  qs('#providers-list').addEventListener('click', async e => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+    const { action, id } = btn.dataset;
+    if (action === 'activate') {
+      await api('set_active', { id });
+      await loadProviders();
+    } else if (action === 'edit') {
+      const p = _providers.find(x => x.id === id);
+      if (p) showForm(p);
+    } else if (action === 'delete') {
+      if (!confirm('¿Eliminar este proveedor?')) return;
+      await api('delete', { id });
+      await loadProviders();
+    }
+  });
+
+  // Load on tab switch
+  document.querySelectorAll('.nav-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.tab === 'providers') loadProviders();
+    });
+  });
+
+  return { loadProviders };
+})();
+
+// ════════════════════════════════════════════════════════════════════════════
+// PROMPT & RULES UI
+// ════════════════════════════════════════════════════════════════════════════
+async function loadPromptRules() {
+  try {
+    const data = await fetch('/api/prompt').then(r => r.json());
+    if (!data.ok) return;
+    qs('#cfg-system-prompt').value = data.system_prompt || '';
+    renderRules(data.rules || []);
+  } catch (_) {}
+}
+
+function renderRules(rules) {
+  const el = qs('#rules-list');
+  el.innerHTML = rules.map((r, i) => `
+    <div class="rule-item" data-idx="${i}">
+      <span class="rule-item-text">${r.replace(/</g,'&lt;')}</span>
+      <div class="rule-item-actions">
+        <button class="btn-ghost-sm" data-rule-action="edit" data-idx="${i}">✎</button>
+        <button class="btn-ghost-sm" style="color:var(--accent-red)" data-rule-action="delete" data-idx="${i}">✕</button>
+      </div>
+    </div>`).join('') || '<p style="color:var(--text-muted);font-size:.85rem">Sin reglas configuradas.</p>';
+}
+
+qs('#rules-list').addEventListener('click', async e => {
+  const btn = e.target.closest('[data-rule-action]');
+  if (!btn) return;
+  const { ruleAction, idx } = btn.dataset;
+  const action = btn.getAttribute('data-rule-action');
+  const index = parseInt(btn.getAttribute('data-idx'));
+  if (action === 'delete') {
+    const res = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'remove_rule', index }) }).then(r => r.json());
+    if (res.ok) renderRules(res.rules || []);
+  } else if (action === 'edit') {
+    const span = btn.closest('.rule-item').querySelector('.rule-item-text');
+    const current = span.textContent;
+    const input = document.createElement('input');
+    input.value = current;
+    span.replaceWith(input);
+    input.focus();
+    input.addEventListener('blur', async () => {
+      const res = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'update_rule', index, rule: input.value }) }).then(r => r.json());
+      if (res.ok) renderRules(res.rules || []);
+    });
+  }
+});
+
+qs('#add-rule-btn').addEventListener('click', async () => {
+  const inp = qs('#new-rule-input');
+  const rule = inp.value.trim();
+  if (!rule) return;
+  const res = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'add_rule', rule }) }).then(r => r.json());
+  if (res.ok) { renderRules(res.rules || []); inp.value = ''; }
+});
+
+qs('#new-rule-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') qs('#add-rule-btn').click();
+});
+
+qs('#reset-rules-btn').addEventListener('click', async () => {
+  if (!confirm('¿Resetear rules al valor por defecto?')) return;
+  const res = await fetch('/api/prompt', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action: 'reset_rules' }) }).then(r => r.json());
+  if (res.ok) renderRules(res.rules || []);
+});
+
+// Cargar prompt+rules al abrir el tab
+document.querySelectorAll('.nav-item').forEach(btn => {
+  btn.addEventListener('click', () => {
+    if (btn.dataset.tab === 'prompts') loadPromptRules();
+  });
+});

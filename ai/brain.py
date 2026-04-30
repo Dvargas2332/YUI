@@ -22,6 +22,8 @@ from queue import Queue
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from config.settings import Settings
+from config.providers import ProviderRegistry
+from config.prompt_rules import PromptRulesManager
 from memory.store import MemoryStore
 from memory.user_profile import UserProfile
 from memory.agenda import AgendaManager
@@ -51,6 +53,10 @@ class Brain:
         self.settings = settings
         self.memory = memory
 
+        # Provider registry + prompt/rules (fuente de verdad para LLM config)
+        self.providers = ProviderRegistry()
+        self.prompt_rules = PromptRulesManager()
+
         # Cognitive modules
         self.style = StylePolicy(memory)
         self.macros = MacroPolicy(memory)
@@ -61,6 +67,8 @@ class Brain:
             settings, memory,
             confirm_fn=confirm_fn,
             step_fn=self._make_step_fn(step_fn),
+            provider_registry=self.providers,
+            prompt_rules=self.prompt_rules,
         )
 
         # User profile (persistent semantic model of the user)

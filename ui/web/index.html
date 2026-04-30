@@ -31,9 +31,9 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             Chat
           </button>
-          <button class="nav-item" data-tab="config">
+          <button class="nav-item" data-tab="providers">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/></svg>
-            APIs & Modelo
+            Proveedores
           </button>
           <button class="nav-item" data-tab="prompts">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
@@ -125,94 +125,125 @@
           </div>
         </section>
 
-        <!-- TAB: CONFIG APIs -->
-        <section class="tab" id="tab-config">
+        <!-- TAB: PROVEEDORES -->
+        <section class="tab" id="tab-providers">
           <div class="tab-header">
             <div>
-              <h2>APIs y Modelo</h2>
-              <p class="tab-desc">Configura el proveedor LLM, claves de API y parámetros de generación.</p>
+              <h2>Proveedores LLM</h2>
+              <p class="tab-desc">Gestiona proveedores, orden de cascada y switch activo.</p>
             </div>
-            <button class="btn-accent" id="save-config-btn">Guardar cambios</button>
+            <button class="btn-accent" id="add-provider-btn">+ Agregar proveedor</button>
           </div>
 
-          <div class="config-grid">
-            <div class="config-card">
-              <h3>Proveedor LLM</h3>
-              <p class="card-desc">URL base del endpoint OpenAI-compatible (DeepSeek, OpenAI, Ollama, LM Studio…).</p>
-              <div class="field-group">
-                <label for="cfg-base-url">Base URL</label>
-                <input id="cfg-base-url" type="text" placeholder="https://api.deepseek.com/v1" />
-              </div>
-              <div class="field-group">
-                <label for="cfg-api-key">API Key</label>
-                <div class="input-with-action">
-                  <input id="cfg-api-key" type="password" placeholder="sk-…" autocomplete="off" />
-                  <button type="button" class="btn-ghost-sm" id="toggle-key-visibility">Mostrar</button>
+          <!-- Lista de proveedores -->
+          <div id="providers-list" class="providers-list"></div>
+
+          <!-- Formulario agregar/editar proveedor (oculto por defecto) -->
+          <div class="provider-form-wrap hidden" id="provider-form-wrap">
+            <div class="config-card provider-form-card">
+              <h3 id="provider-form-title">Nuevo proveedor</h3>
+
+              <div class="provider-form-cols">
+                <div>
+                  <div class="field-group">
+                    <label>Nombre</label>
+                    <input id="pf-name" type="text" placeholder="DeepSeek" />
+                  </div>
+                  <div class="field-group">
+                    <label>Tipo de backend</label>
+                    <select id="pf-backend">
+                      <option value="openai_compat">API OpenAI-compatible</option>
+                      <option value="local">Local (Ollama / llama-cpp / transformers)</option>
+                    </select>
+                  </div>
+                  <div class="field-group">
+                    <label>Orden en cascada</label>
+                    <input id="pf-order" type="number" min="1" placeholder="1" />
+                  </div>
+                  <div class="field-group">
+                    <label>Especialidades</label>
+                    <input id="pf-strengths" type="text" placeholder="general,programacion,razonamiento" />
+                    <span class="field-hint">Separa con coma. YUI las usa para elegir el proveedor óptimo.</span>
+                  </div>
+                  <div class="field-group">
+                    <label>Timeout (s) <span class="field-hint">0 = global</span></label>
+                    <input id="pf-timeout" type="number" min="0" step="1" placeholder="0" />
+                  </div>
+                </div>
+
+                <!-- Columna API -->
+                <div id="pf-col-api">
+                  <div class="field-group">
+                    <label>Base URL</label>
+                    <input id="pf-base-url" type="text" placeholder="https://api.deepseek.com" />
+                  </div>
+                  <div class="field-group">
+                    <label>API Key</label>
+                    <div class="input-with-action">
+                      <input id="pf-api-key" type="password" placeholder="sk-…" autocomplete="off" />
+                      <button type="button" class="btn-ghost-sm" id="pf-toggle-key">Mostrar</button>
+                    </div>
+                  </div>
+                  <div class="field-group">
+                    <label>Modelo rápido</label>
+                    <div class="input-with-action">
+                      <input id="pf-model-fast" type="text" placeholder="deepseek-chat" list="pf-models-list" />
+                      <button type="button" class="btn-ghost-sm" id="pf-fetch-models">Cargar modelos</button>
+                    </div>
+                    <datalist id="pf-models-list"></datalist>
+                  </div>
+                  <div class="field-group">
+                    <label>Modelo profundo</label>
+                    <input id="pf-model-deep" type="text" placeholder="deepseek-reasoner" list="pf-models-list" />
+                  </div>
+                </div>
+
+                <!-- Columna Local -->
+                <div id="pf-col-local" class="hidden">
+                  <div class="field-group">
+                    <label>Tipo local</label>
+                    <select id="pf-local-type">
+                      <option value="ollama">Ollama</option>
+                      <option value="llamacpp">llama-cpp-python (GGUF)</option>
+                      <option value="transformers">HuggingFace transformers</option>
+                    </select>
+                  </div>
+                  <div class="field-group">
+                    <label>Modelo / ruta GGUF</label>
+                    <div class="input-with-action">
+                      <input id="pf-local-model" type="text" placeholder="llama3.1 o /ruta/modelo.gguf" list="pf-models-list" />
+                      <button type="button" class="btn-ghost-sm" id="pf-fetch-local-models">Cargar</button>
+                    </div>
+                  </div>
+                  <div class="field-group">
+                    <label>URL Ollama <span class="field-hint">solo Ollama</span></label>
+                    <input id="pf-local-url" type="text" placeholder="http://localhost:11434" />
+                  </div>
+                  <div class="field-group">
+                    <label>Contexto (n_ctx)</label>
+                    <input id="pf-n-ctx" type="number" min="512" step="512" placeholder="4096" />
+                  </div>
+                  <div class="field-group">
+                    <label>Capas GPU (n_gpu_layers)</label>
+                    <input id="pf-n-gpu" type="number" min="0" step="1" placeholder="0" />
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div class="config-card">
-              <h3>Modelos</h3>
-              <p class="card-desc">YUI usa dos modelos: rápido para respuestas cortas, profundo para razonamiento.</p>
-              <div class="field-group">
-                <label for="cfg-model-fast">Modelo rápido</label>
-                <input id="cfg-model-fast" type="text" placeholder="deepseek-chat" />
-              </div>
-              <div class="field-group">
-                <label for="cfg-model-deep">Modelo profundo</label>
-                <input id="cfg-model-deep" type="text" placeholder="deepseek-reasoner" />
-              </div>
-              <div class="field-group">
-                <label for="cfg-llm-mode">Modo forzado</label>
-                <select id="cfg-llm-mode">
-                  <option value="">Auto (inteligente)</option>
-                  <option value="fast">Siempre rápido</option>
-                  <option value="deep">Siempre profundo</option>
-                </select>
-              </div>
-            </div>
-
-            <div class="config-card">
-              <h3>Parámetros de generación</h3>
-              <p class="card-desc">Controla la creatividad y longitud de las respuestas.</p>
-              <div class="field-group">
-                <label for="cfg-temp-fast">Temperatura rápida <span class="label-val" id="temp-fast-val">0.4</span></label>
-                <input id="cfg-temp-fast" type="range" min="0" max="2" step="0.05" value="0.4" />
-              </div>
-              <div class="field-group">
-                <label for="cfg-temp-deep">Temperatura profunda <span class="label-val" id="temp-deep-val">0.2</span></label>
-                <input id="cfg-temp-deep" type="range" min="0" max="2" step="0.05" value="0.2" />
-              </div>
-              <div class="field-group">
-                <label for="cfg-max-tokens">Tokens máximos</label>
-                <input id="cfg-max-tokens" type="number" min="64" max="4096" step="64" placeholder="240" />
-              </div>
-            </div>
-
-            <div class="config-card">
-              <h3>Idioma y voz</h3>
-              <p class="card-desc">Ajusta el idioma del STT y la voz de síntesis.</p>
-              <div class="field-group">
-                <label for="cfg-stt-lang">Idioma STT</label>
-                <input id="cfg-stt-lang" type="text" placeholder="es-CR" />
-              </div>
-              <div class="field-group">
-                <label for="cfg-tts-engine">Motor TTS</label>
-                <select id="cfg-tts-engine">
-                  <option value="edge">Edge TTS (Microsoft)</option>
-                  <option value="pyttsx3">pyttsx3 (local)</option>
-                  <option value="gtts">gTTS (Google)</option>
-                </select>
-              </div>
-              <div class="field-group">
-                <label for="cfg-wake-word">Wake word</label>
-                <input id="cfg-wake-word" type="text" placeholder="yui" />
+              <div class="provider-form-actions">
+                <button class="btn-accent" id="pf-save-btn">Guardar</button>
+                <button class="btn-ghost" id="pf-cancel-btn">Cancelar</button>
+                <span id="pf-status" class="save-msg hidden"></span>
               </div>
             </div>
           </div>
 
-          <div class="save-result hidden" id="save-result"></div>
+          <!-- Cascada visual -->
+          <div class="config-card" style="margin-top:1.5rem">
+            <h3>Flujo de cascada</h3>
+            <p class="card-desc">Orden en que YUI consulta los proveedores. Si uno rechaza o falla, pasa al siguiente.</p>
+            <div id="cascade-flow" class="cascade-flow"></div>
+          </div>
         </section>
 
         <!-- TAB: PROMPTS & REGLAS -->
@@ -220,20 +251,49 @@
           <div class="tab-header">
             <div>
               <h2>Prompts y Reglas</h2>
-              <p class="tab-desc">Define la personalidad, estilo de respuesta y restricciones del agente.</p>
+              <p class="tab-desc">Define la personalidad y las restricciones del agente como módulos independientes.</p>
             </div>
-            <button class="btn-accent" id="save-prompt-btn">Guardar prompt</button>
           </div>
 
           <div class="config-grid">
+            <!-- System Prompt -->
             <div class="config-card span-2">
-              <h3>System Prompt</h3>
-              <p class="card-desc">Define quién es YUI. Edita directamente y guarda para aplicar en la próxima sesión.</p>
-              <div class="field-group">
-                <textarea id="cfg-system-prompt" rows="14" placeholder="Eres YUI, una asistente…"></textarea>
+              <div class="card-header-row">
+                <div>
+                  <h3>System Prompt</h3>
+                  <p class="card-desc">Personalidad y rol base de YUI. Se combina con las Rules al enviar al LLM.</p>
+                </div>
+                <div style="display:flex;gap:.5rem">
+                  <button class="btn-accent" id="save-prompt-btn">Guardar</button>
+                  <button class="btn-ghost" id="reset-prompt-btn">Resetear</button>
+                </div>
               </div>
+              <div class="field-group">
+                <textarea id="cfg-system-prompt" rows="12" placeholder="Eres YUI, una asistente…"></textarea>
+              </div>
+              <span id="prompt-save-msg" class="save-msg hidden"></span>
             </div>
 
+            <!-- Rules -->
+            <div class="config-card span-2">
+              <div class="card-header-row">
+                <div>
+                  <h3>Rules</h3>
+                  <p class="card-desc">Instrucciones adicionales modulares. Cada regla se puede agregar, editar o eliminar individualmente.</p>
+                </div>
+                <button class="btn-ghost" id="reset-rules-btn">Resetear rules</button>
+              </div>
+              <div id="rules-list" class="rules-list"></div>
+              <div class="field-group" style="margin-top:.75rem">
+                <div class="input-with-action">
+                  <input id="new-rule-input" type="text" placeholder="Nueva regla…" />
+                  <button type="button" class="btn-accent" id="add-rule-btn">Agregar</button>
+                </div>
+              </div>
+              <span id="rules-save-msg" class="save-msg hidden"></span>
+            </div>
+
+            <!-- Estilo, macros y permisos existentes -->
             <div class="config-card">
               <h3>Reglas de estilo</h3>
               <div class="field-group">

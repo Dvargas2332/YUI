@@ -26,6 +26,8 @@ class UiHttpServer:
         on_set_mode: Optional[Callable[[str], dict[str, Any]]] = None,
         on_plugin_action: Optional[Callable[[str, dict], dict[str, Any]]] = None,
         on_shutdown: Optional[Callable[[], None]] = None,
+        on_providers: Optional[Callable[[str, dict], dict[str, Any]]] = None,
+        on_prompt: Optional[Callable[[str, dict], dict[str, Any]]] = None,
     ):
         self.host = host
         self.port = int(port)
@@ -39,6 +41,8 @@ class UiHttpServer:
         self.on_set_mode = on_set_mode
         self.on_plugin_action = on_plugin_action
         self.on_shutdown = on_shutdown
+        self.on_providers = on_providers
+        self.on_prompt = on_prompt
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -68,6 +72,8 @@ class UiHttpServer:
         on_set_mode = self.on_set_mode
         on_plugin_action = self.on_plugin_action
         on_shutdown = self.on_shutdown
+        on_providers = self.on_providers
+        on_prompt = self.on_prompt
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
@@ -93,6 +99,18 @@ class UiHttpServer:
                     state = get_state()
                     self._send_json({"ok": True, "plugins": state.get("plugins", [])})
                     return
+                if parsed.path == "/api/providers":
+                    if on_providers is None:
+                        self._send_json({"error": "not_supported"}, status=HTTPStatus.NOT_IMPLEMENTED)
+                        return
+                    self._send_json(on_providers("list", {}))
+                    return
+                if parsed.path == "/api/prompt":
+                    if on_prompt is None:
+                        self._send_json({"error": "not_supported"}, status=HTTPStatus.NOT_IMPLEMENTED)
+                        return
+                    self._send_json(on_prompt("get", {}))
+                    return
                 self._serve_static(parsed.path)
 
             def do_POST(self) -> None:  # noqa: N802
@@ -117,6 +135,41 @@ class UiHttpServer:
                     # Dispatch as a normal command
                     accepted = on_command(text, "")
                     self._send_json({"ok": bool(accepted), "text": text})
+                    return
+
+                # ── Providers ─────────────────────────────────────────────
+                if parsed.path in ("/api/providers", "/api/providers/fetch-models"):
+                    if on_providers is None:
+                        self._send_json({"error": "not_supported"}, status=HTTPStatus.NOT_IMPLEMENTED)
+                        return
+                    length = int(self.headers.get("Content-Length", "0") or "0")
+                    raw = self.rfile.read(length) if length > 0 else b"{}"
+                    try:
+                        payload = json.loads(raw.decode("utf-8"))
+                    except Exception:
+                        self._send_json({"error": "invalid_json"}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    if parsed.path == "/api/providers/fetch-models":
+                        self._send_json(on_providers("fetch_models", payload))
+                    else:
+                        action = str(payload.get("action") or "list").strip()
+                        self._send_json(on_providers(action, payload))
+                    return
+
+                # ── Prompt & Rules ─────────────────────────────────────────
+                if parsed.path == "/api/prompt":
+                    if on_prompt is None:
+                        self._send_json({"error": "not_supported"}, status=HTTPStatus.NOT_IMPLEMENTED)
+                        return
+                    length = int(self.headers.get("Content-Length", "0") or "0")
+                    raw = self.rfile.read(length) if length > 0 else b"{}"
+                    try:
+                        payload = json.loads(raw.decode("utf-8"))
+                    except Exception:
+                        self._send_json({"error": "invalid_json"}, status=HTTPStatus.BAD_REQUEST)
+                        return
+                    action = str(payload.get("action") or "get").strip()
+                    self._send_json(on_prompt(action, payload))
                     return
 
                 allowed = {"/api/command", "/api/toggle", "/api/config", "/api/clear", "/api/compact", "/api/mode", "/api/plugins", "/api/shutdown"}
