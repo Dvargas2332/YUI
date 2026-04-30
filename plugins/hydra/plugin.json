@@ -1,0 +1,8 @@
+{
+  "id": "hydra",
+  "name": "Hydra Brute Force",
+  "version": "1.0.0",
+  "description": "Ataques de fuerza bruta y diccionario sobre servicios de red con THC-Hydra. Solo sobre activos autorizados.",
+  "entrypoint": "plugin.py",
+  "enabled": true
+}

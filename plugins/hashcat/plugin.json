@@ -1,0 +1,8 @@
+{
+  "id": "hashcat",
+  "name": "Hashcat Password Cracker",
+  "version": "1.0.0",
+  "description": "Cracking de hashes con Hashcat (GPU/CPU). Diccionario, fuerza bruta y ataques por reglas.",
+  "entrypoint": "plugin.py",
+  "enabled": true
+}
