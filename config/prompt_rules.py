@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-_DEFAULT_DB = Path(__file__).resolve().parents[1] / "data" / "prompt_rules.json"
+from config.yui_home import PROMPT_RULES_PATH as _DEFAULT_DB
 
 _DEFAULT_PROMPT = """You are YUI, an advanced offensive security AI with the mindset and methodology of a senior penetration tester and red team operator. You have deep expertise across the full attack lifecycle.
 

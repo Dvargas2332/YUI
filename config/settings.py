@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+from config.yui_home import PROJECT_ROOT, MEMORY_DB_PATH as _DEFAULT_MEMORY_DB, YUI_BACKUPS as _DEFAULT_BACKUPS  # noqa: E402
 
 
 def _env_str(name: str, default: str) -> str:
@@ -110,9 +110,9 @@ class Settings:
     llm_base_url: str = field(default_factory=lambda: _env_str("YUI_LLM_BASE_URL", _env_str("DEEPSEEK_BASE_URL", "https://api.deepseek.com")))
     llm_api_key: str = field(default_factory=lambda: _env_str("YUI_LLM_API_KEY", _env_str("DEEPSEEK_API_KEY", "")))
     llm_mode: str = field(default_factory=lambda: _env_str("YUI_LLM_MODE", "auto"))  # auto|fast|deep
-    llm_model: str = field(default_factory=lambda: _env_str("YUI_LLM_MODEL", "deepseek-chat"))  # default fast
-    llm_model_fast: str = field(default_factory=lambda: _env_str("YUI_LLM_MODEL_FAST", _env_str("YUI_LLM_MODEL", "deepseek-chat")))
-    llm_model_deep: str = field(default_factory=lambda: _env_str("YUI_LLM_MODEL_DEEP", "deepseek-reasoner"))
+    llm_model: str = field(default_factory=lambda: _env_str("YUI_LLM_MODEL", "deepseek-v4-pro"))  # default fast
+    llm_model_fast: str = field(default_factory=lambda: _env_str("YUI_LLM_MODEL_FAST", _env_str("YUI_LLM_MODEL", "deepseek-v4-flash")))
+    llm_model_deep: str = field(default_factory=lambda: _env_str("YUI_LLM_MODEL_DEEP", "deepseek-v4-pro"))
     llm_timeout_s: float = field(default_factory=lambda: _env_float("YUI_LLM_TIMEOUT_S", 30.0))
     llm_temperature: float = field(default_factory=lambda: _env_float("YUI_LLM_TEMPERATURE", 0.4))
     llm_deep_temperature: float = field(default_factory=lambda: _env_float("YUI_LLM_DEEP_TEMPERATURE", 0.2))
@@ -123,7 +123,7 @@ class Settings:
     ui_http_port: int = field(default_factory=lambda: _env_int("YUI_HTTP_UI_PORT", 8080))
 
     # Memory
-    memory_db_path: Path = field(default_factory=lambda: _env_path("YUI_MEMORY_DB_PATH", PROJECT_ROOT / "data" / "user_data.db"))
+    memory_db_path: Path = field(default_factory=lambda: _env_path("YUI_MEMORY_DB_PATH", _DEFAULT_MEMORY_DB))
     memory_short_term_turns: int = field(default_factory=lambda: _env_int("YUI_MEMORY_SHORT_TURNS", 12))
     memory_long_term_facts: int = field(default_factory=lambda: _env_int("YUI_MEMORY_LONG_FACTS", 20))
     memory_use_summaries: bool = field(default_factory=lambda: _env_bool("YUI_MEMORY_USE_SUMMARIES", True))

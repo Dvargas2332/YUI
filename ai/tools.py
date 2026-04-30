@@ -603,7 +603,7 @@ def _dispatch_agenda(name: str, args: Dict[str, Any], *, store: Optional[Any] = 
     return f"[error] Acción de agenda desconocida: {name}"
 
 
-_BACKUP_DIR = Path(__file__).resolve().parents[1] / "data" / "backups"
+from config.yui_home import YUI_BACKUPS as _BACKUP_DIR
 _LARGE_CHANGE_THRESHOLD = 0.70  # >70% líneas cambiadas → advertencia
 
 

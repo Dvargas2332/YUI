@@ -16,7 +16,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-_DEFAULT_DB = Path(__file__).resolve().parents[1] / "data" / "providers.json"
+from config.yui_home import PROVIDERS_PATH as _DEFAULT_DB
 
 # Tipos de backend soportados
 BACKEND_OPENAI = "openai_compat"   # cualquier API bajo estándar OpenAI

@@ -2063,6 +2063,8 @@ if __name__ == "__main__":
     except Exception:
         pass
     load_dotenv(override=True)
+    from config.yui_home import init_yui_home
+    init_yui_home()
     install_crash_logging()
     if not acquire_single_instance_lock():
         print("[YUI] Ya hay otra instancia ejecutándose. Cierra la anterior y vuelve a intentar.")

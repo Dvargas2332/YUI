@@ -30,7 +30,8 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _default_cache_path() -> Path:
-    return Path(os.getenv("YUI_PROFILE_CACHE_PATH", "") or (Path("data") / "system_profile.json"))
+    from config.yui_home import SYSTEM_PROFILE_PATH
+    return Path(os.getenv("YUI_PROFILE_CACHE_PATH", "") or SYSTEM_PROFILE_PATH)
 
 
 def _get_total_memory_gb() -> Optional[float]:
