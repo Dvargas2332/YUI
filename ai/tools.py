@@ -39,7 +39,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "write_file",
-            "description": "Crea o sobreescribe un archivo con el contenido dado. Úsalo para crear código, configuraciones o cualquier archivo de texto.",
+            "description": "Crea o sobreescribe un archivo COMPLETO. Usa esto solo para crear archivos nuevos o reescrituras totales. Para modificar partes de un archivo existente, usa patch_file.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -47,6 +47,22 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
                     "content": {"type": "string", "description": "Contenido completo que tendrá el archivo."},
                 },
                 "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "patch_file",
+            "description": "Edita un fragmento específico de un archivo sin reescribirlo completo. Busca el bloque 'old_str' exacto y lo reemplaza con 'new_str'. Preferir esto sobre write_file para modificaciones parciales.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Ruta del archivo a modificar."},
+                    "old_str": {"type": "string", "description": "Fragmento exacto de texto a reemplazar (debe existir tal cual en el archivo)."},
+                    "new_str": {"type": "string", "description": "Texto con el que se reemplazará old_str."},
+                },
+                "required": ["path", "old_str", "new_str"],
             },
         },
     },
@@ -438,7 +454,7 @@ TOOL_DEFINITIONS: List[Dict[str, Any]] = [
 ]
 
 # Tools that require confirmation before execution
-DESTRUCTIVE_TOOLS = {"write_file", "create_folder", "run_command", "browser_eval"}
+DESTRUCTIVE_TOOLS = {"write_file", "patch_file", "create_folder", "run_command", "browser_eval"}
 
 
 def execute_tool(
@@ -456,6 +472,8 @@ def execute_tool(
     """
     if name == "write_file":
         return _write_file(args, confirm_fn=confirm_fn, diff_fn=diff_fn)
+    if name == "patch_file":
+        return _patch_file(args, confirm_fn=confirm_fn, diff_fn=diff_fn)
     if name == "read_file":
         return _read_file(args)
     if name == "create_folder":
@@ -585,6 +603,35 @@ def _dispatch_agenda(name: str, args: Dict[str, Any], *, store: Optional[Any] = 
     return f"[error] Acción de agenda desconocida: {name}"
 
 
+_BACKUP_DIR = Path(__file__).resolve().parents[1] / "data" / "backups"
+_LARGE_CHANGE_THRESHOLD = 0.70  # >70% líneas cambiadas → advertencia
+
+
+def _make_backup(p: Path) -> Optional[Path]:
+    """Copia el archivo a data/backups/<relpath>/<timestamp>.bak antes de sobreescribir."""
+    try:
+        import datetime
+        rel = p.name
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak_dir = _BACKUP_DIR / rel
+        bak_dir.mkdir(parents=True, exist_ok=True)
+        bak = bak_dir / f"{stamp}.bak"
+        bak.write_bytes(p.read_bytes())
+        return bak
+    except Exception:
+        return None
+
+
+def _diff_ratio(old_lines: List[str], new_lines: List[str]) -> float:
+    """Fracción de líneas del archivo original que cambian (0.0–1.0)."""
+    if not old_lines:
+        return 0.0
+    import difflib
+    matcher = difflib.SequenceMatcher(None, old_lines, new_lines)
+    changed = sum(max(i2 - i1, j2 - j1) for tag, i1, i2, j1, j2 in matcher.get_opcodes() if tag != "equal")
+    return min(changed / len(old_lines), 1.0)
+
+
 def _write_file(
     args: Dict[str, Any],
     *,
@@ -597,30 +644,95 @@ def _write_file(
         return "[error] path es requerido"
 
     p = Path(path).expanduser()
-    action = "sobreescribir" if p.exists() else "crear"
+    is_overwrite = p.exists()
+    action = "sobreescribir" if is_overwrite else "crear"
     desc = f"{action} archivo: {p}"
 
     old_lines: List[str] = []
-    if p.exists():
+    if is_overwrite:
         try:
             old_lines = p.read_text(encoding="utf-8", errors="replace").splitlines()
         except Exception:
             pass
 
+    new_lines = content.splitlines()
+
+    # Advertir si se cambia más del 70% del archivo existente
+    if is_overwrite and old_lines:
+        ratio = _diff_ratio(old_lines, new_lines)
+        if ratio >= _LARGE_CHANGE_THRESHOLD:
+            pct = int(ratio * 100)
+            desc = f"[ADVERTENCIA: {pct}% del archivo cambia] {desc}"
+
     if confirm_fn is not None:
         if not confirm_fn(desc):
             return "[cancelado] El usuario rechazó la operación."
 
+    # Backup automático antes de sobreescribir
+    bak_path: Optional[Path] = None
+    if is_overwrite:
+        bak_path = _make_backup(p)
+
     if diff_fn is not None:
         try:
-            diff_fn(str(p), old_lines, content.splitlines())
+            diff_fn(str(p), old_lines, new_lines)
         except Exception:
             pass
 
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
-        return f"[ok] Archivo guardado: {p} ({len(content)} caracteres)"
+        bak_note = f" (backup: {bak_path.name})" if bak_path else ""
+        return f"[ok] Archivo guardado: {p} ({len(content)} caracteres){bak_note}"
+    except Exception as e:
+        return f"[error] No pude escribir {p}: {e}"
+
+
+def _patch_file(
+    args: Dict[str, Any],
+    *,
+    confirm_fn: Optional[Callable[[str], bool]],
+    diff_fn: Optional[Callable[[str, List[str], List[str]], None]] = None,
+) -> str:
+    path = str(args.get("path", "")).strip()
+    old_str = str(args.get("old_str", ""))
+    new_str = str(args.get("new_str", ""))
+    if not path:
+        return "[error] path es requerido"
+    if not old_str:
+        return "[error] old_str es requerido"
+
+    p = Path(path).expanduser()
+    if not p.exists():
+        return f"[error] Archivo no encontrado: {p}"
+
+    try:
+        original = p.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return f"[error] No pude leer {p}: {e}"
+
+    if old_str not in original:
+        return f"[error] El fragmento old_str no se encontró exactamente en {p}. Lee el archivo primero para confirmar el texto."
+
+    patched = original.replace(old_str, new_str, 1)
+
+    if confirm_fn is not None:
+        desc = f"patch_file: {p} ({original.count(chr(10))+1} → {patched.count(chr(10))+1} líneas)"
+        if not confirm_fn(desc):
+            return "[cancelado] El usuario rechazó la operación."
+
+    bak_path = _make_backup(p)
+
+    if diff_fn is not None:
+        try:
+            diff_fn(str(p), original.splitlines(), patched.splitlines())
+        except Exception:
+            pass
+
+    try:
+        p.write_text(patched, encoding="utf-8")
+        bak_note = f" (backup: {bak_path.name})" if bak_path else ""
+        return f"[ok] Patch aplicado en {p}{bak_note}"
     except Exception as e:
         return f"[error] No pude escribir {p}: {e}"
 
