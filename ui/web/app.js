@@ -620,8 +620,8 @@ function updateSliderLabels() {
   if (dt) qs('#temp-deep-val').textContent = parseFloat(dt.value).toFixed(2);
 }
 
-qs('#cfg-temp-fast').addEventListener('input', updateSliderLabels);
-qs('#cfg-temp-deep').addEventListener('input', updateSliderLabels);
+qs('#cfg-temp-fast')?.addEventListener('input', updateSliderLabels);
+qs('#cfg-temp-deep')?.addEventListener('input', updateSliderLabels);
 
 // Mark dirty on any change
 ['cfg-base-url','cfg-api-key','cfg-model-fast','cfg-model-deep','cfg-llm-mode',
@@ -632,7 +632,7 @@ qs('#cfg-temp-deep').addEventListener('input', updateSliderLabels);
 });
 
 // Toggle key visibility
-qs('#toggle-key-visibility').addEventListener('click', function () {
+qs('#toggle-key-visibility')?.addEventListener('click', function () {
   const inp = qs('#cfg-api-key');
   const hidden = inp.type === 'password';
   inp.type = hidden ? 'text' : 'password';
@@ -640,7 +640,7 @@ qs('#toggle-key-visibility').addEventListener('click', function () {
 });
 
 // Save config
-qs('#save-config-btn').addEventListener('click', async () => {
+qs('#save-config-btn')?.addEventListener('click', async () => {
   const payload = {
     YUI_LLM_BASE_URL: qs('#cfg-base-url').value.trim(),
     YUI_LLM_API_KEY: qs('#cfg-api-key').value.trim(),
