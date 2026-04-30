@@ -294,6 +294,7 @@ function handleWsEvent(/** @type {any} */ evt) {
   switch (evt.type) {
     case 'hello':
       loadBootstrap();
+      loadPlugins();
       break;
 
     case 'thinking':
