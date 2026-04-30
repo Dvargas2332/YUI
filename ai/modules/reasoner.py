@@ -9,6 +9,7 @@ The Reasoner handles all direct communication with the LLM provider:
 """
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import os
 import re
@@ -533,13 +534,29 @@ class Reasoner:
         msgs: List[Dict[str, Any]] = list(messages)
         _tools_used_count = 0
 
+        _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="yui-llm")
         for _iter in range(max_iterations):
             if self._check_abort():
+                _executor.shutdown(wait=False)
                 return "Detenido."
 
             provider = self._best_provider_for(task_hint) if task_hint else self._active_provider()
-            raw: Any = self._chat_with_tools(msgs, model=model, temperature=temperature,
-                                             max_tokens=max_tokens, provider=provider)
+            _future = _executor.submit(
+                self._chat_with_tools, msgs,
+                model=model, temperature=temperature, max_tokens=max_tokens, provider=provider,
+            )
+            while True:
+                if self._check_abort():
+                    _executor.shutdown(wait=False)
+                    return "Detenido."
+                try:
+                    raw: Any = _future.result(timeout=0.1)
+                    break
+                except concurrent.futures.TimeoutError:
+                    continue
+                except Exception as _e:
+                    raw = f"[error LLM] {_e}"
+                    break
 
             if isinstance(raw, str):
                 if _tools_used_count > 0 and self._signals_pending_work(raw):
@@ -679,6 +696,7 @@ class Reasoner:
                             pass
                     msgs.append({"role": "tool", "tool_call_id": tool_id, "content": result})
 
+        _executor.shutdown(wait=False)
         msgs.append({"role": "user", "content": "Resume brevemente en 1-2 frases qué hiciste y si todo salió bien."})
         try:
             summary = self._chat(msgs, model=model, temperature=temperature, max_tokens=max_tokens)
